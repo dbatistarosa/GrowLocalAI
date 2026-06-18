@@ -951,6 +951,141 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Support & Help Tab */}
+        {activeTab === "support" && (
+          <div className="space-y-6 animate-fadeIn">
+            <div>
+              <h2 className="text-xl font-bold text-white">GrowLocal Help & Support</h2>
+              <p className="text-sm text-slate-400">Get instant AI help or open a support ticket with our human team.</p>
+            </div>
+
+            <div className="grid md:grid-cols-12 gap-8 items-start">
+              
+              {/* AI Support Chat */}
+              <div className="md:col-span-7 space-y-4">
+                <div className="bg-slate-800/40 border border-slate-800 rounded-xl flex flex-col h-[500px]">
+                  <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                      <h3 className="font-bold text-white text-sm">GrowLocal Support AI</h3>
+                    </div>
+                  </div>
+                  
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {supportHistory.length === 0 ? (
+                      <div className="text-center py-10 space-y-2">
+                        <div className="text-4xl">👋</div>
+                        <p className="text-sm text-white font-bold">How can I help you today?</p>
+                        <p className="text-xs text-slate-400 max-w-xs mx-auto">I'm trained on GrowLocal features, pricing, and setup steps.</p>
+                      </div>
+                    ) : (
+                      supportHistory.map((msg, i) => (
+                        <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <div className={`max-w-[80%] p-3 rounded-xl text-xs leading-relaxed ${
+                            msg.role === 'user' 
+                              ? 'bg-purple-600 text-white rounded-tr-none' 
+                              : 'bg-slate-700/50 text-slate-100 border border-slate-700 rounded-tl-none'
+                          }`}>
+                            {msg.content}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    {sendingSupport && (
+                      <div className="flex justify-start animate-pulse">
+                        <div className="bg-slate-700/50 p-3 rounded-xl rounded-tl-none border border-slate-700">
+                          <div className="flex gap-1">
+                            <div className="w-1 h-1 bg-slate-400 rounded-full animate-bounce"></div>
+                            <div className="w-1 h-1 bg-slate-400 rounded-full animate-bounce delay-75"></div>
+                            <div className="w-1 h-1 bg-slate-400 rounded-full animate-bounce delay-150"></div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <form onSubmit={handleSupportChat} className="p-4 border-t border-slate-800 flex gap-2">
+                    <input
+                      type="text"
+                      value={supportMessage}
+                      onChange={(e) => setSupportMessage(e.target.value)}
+                      placeholder="Ask a question..."
+                      className="flex-1 bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-purple-500 text-sm"
+                    />
+                    <button
+                      type="submit"
+                      disabled={sendingSupport || !supportMessage.trim()}
+                      className="bg-purple-600 hover:bg-purple-500 text-white p-2 rounded-lg transition disabled:opacity-50"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                      </svg>
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              {/* Support Tickets */}
+              <div className="md:col-span-5 space-y-6">
+                <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-4">
+                  <h3 className="font-bold text-white text-sm italic">Need Human Help?</h3>
+                  <p className="text-xs text-slate-400">If the AI can't help, open a ticket and our team will get back to you within 24 hours.</p>
+                  
+                  <form onSubmit={handleCreateTicket} className="space-y-3">
+                    <input
+                      type="text"
+                      required
+                      value={newTicketSubject}
+                      onChange={(e) => setNewTicketSubject(e.target.value)}
+                      placeholder="Subject"
+                      className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-purple-500 text-sm"
+                    />
+                    <textarea
+                      required
+                      value={newTicketMessage}
+                      onChange={(e) => setNewTicketMessage(e.target.value)}
+                      placeholder="Describe your issue..."
+                      className="w-full h-24 bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-purple-500 text-sm"
+                    />
+                    <button
+                      type="submit"
+                      disabled={creatingTicket}
+                      className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold py-2 rounded-lg transition border border-slate-700 text-xs"
+                    >
+                      {creatingTicket ? "Opening Ticket..." : "Open Support Ticket"}
+                    </button>
+                  </form>
+                </div>
+
+                <div className="space-y-4">
+                  <h3 className="font-bold text-white text-sm px-1">Your Tickets</h3>
+                  <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1">
+                    {tickets.length === 0 ? (
+                      <p className="text-xs text-slate-500 italic p-4 text-center border border-dashed border-slate-800 rounded-lg">No active tickets.</p>
+                    ) : (
+                      tickets.map(ticket => (
+                        <div key={ticket.id} className="bg-slate-800/30 border border-slate-800 rounded-xl p-4 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-white">{ticket.subject}</span>
+                            <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded ${
+                              ticket.status === 'open' ? 'bg-blue-500/10 text-blue-400' : 'bg-green-500/10 text-green-400'
+                            }`}>
+                              {ticket.status}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 line-clamp-2">{ticket.message}</p>
+                          <div className="text-[10px] text-slate-500">{new Date(ticket.created_at).toLocaleDateString()}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+
         {/* Settings Tab */}
         {activeTab === "settings" && (
           <div className="space-y-6 animate-fadeIn">
