@@ -55,6 +55,14 @@ interface ReviewRequestStats {
   conversion_rate: number;
 }
 
+interface SupportTicket {
+  id: string;
+  subject: string;
+  message: string;
+  status: string;
+  created_at: string;
+}
+
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [business, setBusiness] = useState<Business | null>(null);
@@ -78,11 +86,24 @@ export default function Dashboard() {
   const [reviewMessage, setReviewMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [lastCreatedLink, setLastCreatedLink] = useState<string | null>(null);
 
-  // Simulated chatbot logs
-  const [chatbotLogs] = useState([
-    { id: 1, user: "Customer", msg: "Are you guys open on Sundays?", reply: "GrowLocal AI: Yes, Apex Barbershop is open on Sundays from 10:00 AM to 4:00 PM! Would you like me to help you book an appointment?", time: "2 hours ago" },
-    { id: 2, user: "Customer", msg: "Do you have parking?", reply: "GrowLocal AI: Yes! We have free street parking directly in front of the shop and a dedicated lot in the back.", time: "4 hours ago" }
-  ]);
+  // Tier-based tab visibility and usage
+  const [availableTabs, setAvailableTabs] = useState<string[]>([]);
+
+  // AI features states
+  const [chatbotSnippet, setChatbotSnippet] = useState("");
+  const [chatbotHistory, setChatbotHistory] = useState<any[]>([]);
+  const [chatbotConfig, setChatbotConfig] = useState<string>("");
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [generatingPosts, setGeneratingPosts] = useState(false);
+
+  // Support states
+  const [tickets, setTickets] = useState<SupportTicket[]>([]);
+  const [supportMessage, setSupportMessage] = useState("");
+  const [supportHistory, setSupportHistory] = useState<any[]>([]);
+  const [sendingSupport, setSendingSupport] = useState(false);
+  const [newTicketSubject, setNewTicketSubject] = useState("");
+  const [newTicketMessage, setNewTicketMessage] = useState("");
+  const [creatingTicket, setCreatingTicket] = useState(false);
 
   const token = () => localStorage.getItem("token");
 
@@ -104,6 +125,16 @@ export default function Dashboard() {
         const profileData = await userRes.json();
         setUser(profileData.user);
         setBusiness(profileData.business);
+        
+        // Initialize chatbot config from business data
+        if (profileData.business?.chatbot_config) {
+          try {
+            const config = JSON.parse(profileData.business.chatbot_config);
+            setChatbotConfig(config.extraInfo || "");
+          } catch (e) {
+            console.error("Failed to parse chatbot config");
+          }
+        }
 
         // Fetch Posts
         const postsRes = await fetch("/api/posts", {
@@ -139,6 +170,44 @@ export default function Dashboard() {
         if (statsRes.ok) {
           const statsData = await statsRes.json();
           setReviewStats(statsData);
+        }
+
+        // Fetch Subscription Limits (tier-based tab filtering + usage)
+        const limitsRes = await fetch("/api/subscription/limits", {
+          headers: { Authorization: `Bearer ${t}` }
+        });
+        if (limitsRes.ok) {
+          const limitsData = await limitsRes.json();
+          if (limitsData.tabs && limitsData.tabs.length > 0) {
+            setAvailableTabs(limitsData.tabs);
+          }
+        }
+
+        // Fetch Chatbot Snippet
+        const snippetRes = await fetch("/api/ai/chatbot/snippet", {
+          headers: { Authorization: `Bearer ${t}` }
+        });
+        if (snippetRes.ok) {
+          const snippetData = await snippetRes.json();
+          setChatbotSnippet(snippetData.snippet);
+        }
+
+        // Fetch Chat History
+        const historyRes = await fetch("/api/ai/chat/history", {
+          headers: { Authorization: `Bearer ${t}` }
+        });
+        if (historyRes.ok) {
+          const historyData = await historyRes.json();
+          setChatbotHistory(historyData);
+        }
+
+        // Fetch Support Tickets
+        const ticketsRes = await fetch("/api/tickets", {
+          headers: { Authorization: `Bearer ${t}` }
+        });
+        if (ticketsRes.ok) {
+          const ticketsData = await ticketsRes.json();
+          setTickets(ticketsData);
         }
 
       } catch (err) {
@@ -245,6 +314,111 @@ export default function Dashboard() {
     }
   };
 
+  const handleForceGeneratePosts = async () => {
+    const t = token();
+    if (!t) return;
+    
+    setGeneratingPosts(true);
+    try {
+      const res = await fetch("/api/ai/generate-posts", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${t}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPosts(prev => [...data.posts, ...prev]);
+      }
+    } catch (err) {
+      console.error("Failed to generate posts:", err);
+    } finally {
+      setGeneratingPosts(false);
+    }
+  };
+
+  const handleSaveChatbotConfig = async () => {
+    const t = token();
+    if (!t) return;
+    
+    setSavingConfig(true);
+    try {
+      const res = await fetch("/api/ai/chatbot/config", {
+        method: "PATCH",
+        headers: { 
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${t}` 
+        },
+        body: JSON.stringify({ config: { extraInfo: chatbotConfig } })
+      });
+      if (res.ok) {
+        setReviewMessage({ type: "success", text: "Chatbot settings saved!" });
+      }
+    } catch (err) {
+      console.error("Failed to save config:", err);
+      setReviewMessage({ type: "error", text: "Failed to save chatbot settings." });
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const handleSupportChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supportMessage.trim()) return;
+
+    const t = token();
+    const userMsg = { role: 'user', content: supportMessage, created_at: new Date().toISOString() };
+    setSupportHistory(prev => [...prev, userMsg]);
+    setSupportMessage("");
+    setSendingSupport(true);
+
+    try {
+      const res = await fetch("/api/support/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${t}`
+        },
+        body: JSON.stringify({ message: userMsg.content, conversationId: "support-session" })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSupportHistory(prev => [...prev, { role: 'assistant', content: data.response, created_at: new Date().toISOString() }]);
+      }
+    } catch (err) {
+      console.error("Support chat error:", err);
+    } finally {
+      setSendingSupport(false);
+    }
+  };
+
+  const handleCreateTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTicketSubject || !newTicketMessage) return;
+
+    setCreatingTicket(true);
+    const t = token();
+    try {
+      const res = await fetch("/api/tickets", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${t}`
+        },
+        body: JSON.stringify({ subject: newTicketSubject, message: newTicketMessage })
+      });
+      if (res.ok) {
+        const newTicket = await res.json();
+        setTickets(prev => [newTicket, ...prev]);
+        setNewTicketSubject("");
+        setNewTicketMessage("");
+        setReviewMessage({ type: "success", text: "Support ticket created successfully!" });
+      }
+    } catch (err) {
+      console.error("Failed to create ticket:", err);
+    } finally {
+      setCreatingTicket(false);
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text).then(() => {
       setReviewMessage({ type: "success", text: "Link copied to clipboard!" });
@@ -284,8 +458,9 @@ export default function Dashboard() {
               { id: "reviews", label: "⭐ Customer Reviews" },
               { id: "chatbot", label: "💬 Lead Chatbot" },
               { id: "seo", label: "📈 SEO Report" },
+              { id: "support", label: "🎧 Support & Help" },
               { id: "settings", label: "⚙️ Settings" }
-            ].map((tab) => (
+            ].filter(tab => availableTabs.length === 0 || availableTabs.includes(tab.id)).map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
@@ -394,8 +569,12 @@ export default function Dashboard() {
                 <h2 className="text-xl font-bold text-white">Social Media Manager</h2>
                 <p className="text-sm text-slate-400">Manage, preview, and approve your AI-generated marketing posts.</p>
               </div>
-              <button className="bg-purple-600 hover:bg-purple-500 text-white font-semibold text-sm px-4 py-2 rounded-lg transition">
-                ⚡ Force AI Content Generation
+              <button 
+                onClick={handleForceGeneratePosts}
+                disabled={generatingPosts}
+                className="bg-purple-600 hover:bg-purple-500 text-white font-semibold text-sm px-4 py-2 rounded-lg transition disabled:opacity-50"
+              >
+                {generatingPosts ? "Generating..." : "⚡ Force AI Content Generation"}
               </button>
             </div>
 
@@ -651,30 +830,68 @@ export default function Dashboard() {
 
             <div className="grid md:grid-cols-12 gap-8 items-start">
               
-              {/* Embed Script Instructions */}
-              <div className="md:col-span-6 bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-4">
-                <h3 className="font-bold text-white">1. Copy Embed Snippet</h3>
-                <p className="text-xs text-slate-300 leading-relaxed">Paste this code tag directly into the header/body of your external site to run the GrowLocal Chatbot widget.</p>
-                <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 text-xs font-mono text-purple-400 overflow-x-auto">
-                  {`<!-- GrowLocal AI Chatbot Widget -->
-<script src="http://localhost:3000/api/chatbot/embed.js"></script>`}
+              <div className="md:col-span-6 space-y-6">
+                {/* Bot Configuration */}
+                <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-4">
+                  <h3 className="font-bold text-white">Bot Knowledge Base</h3>
+                  <p className="text-xs text-slate-300 leading-relaxed">Give the AI more context about your business (services, pricing, hours, etc.) so it can answer customer questions better.</p>
+                  <textarea
+                    value={chatbotConfig}
+                    onChange={(e) => setChatbotConfig(e.target.value)}
+                    placeholder="e.g. Our hours are 9am-6pm. Men's haircuts are $30. We are located next to the coffee shop..."
+                    className="w-full h-32 bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-purple-500 text-sm"
+                  />
+                  <button
+                    onClick={handleSaveChatbotConfig}
+                    disabled={savingConfig}
+                    className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-2 rounded-lg transition disabled:opacity-50 text-xs"
+                  >
+                    {savingConfig ? "Saving..." : "Save Bot Configuration"}
+                  </button>
+                  {reviewMessage && reviewMessage.text.includes("Chatbot") && (
+                    <p className={`text-xs ${reviewMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
+                      {reviewMessage.text}
+                    </p>
+                  )}
+                </div>
+
+                {/* Embed Script Instructions */}
+                <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-4">
+                  <h3 className="font-bold text-white">Embed Snippet</h3>
+                  <p className="text-xs text-slate-300 leading-relaxed">Paste this code tag directly into the header/body of your external site to run the GrowLocal Chatbot widget.</p>
+                  <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 text-xs font-mono text-purple-400 overflow-x-auto whitespace-pre">
+                    {chatbotSnippet || "Loading snippet..."}
+                  </div>
+                  {chatbotSnippet && (
+                    <button 
+                      onClick={() => copyToClipboard(chatbotSnippet)}
+                      className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold py-1.5 px-3 rounded transition border border-slate-700"
+                    >
+                      Copy Snippet
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* Chatbot conversation logs */}
               <div className="md:col-span-6 space-y-4">
-                <h3 className="font-bold text-white">2. Live Conversation Logs</h3>
-                <div className="space-y-4">
-                  {chatbotLogs.map((log) => (
-                    <div key={log.id} className="bg-slate-800/30 border border-slate-800 rounded-xl p-5 space-y-2">
-                      <div className="flex items-center justify-between text-xs text-slate-400">
-                        <span className="font-semibold text-purple-400">Session Active</span>
-                        <span>{log.time}</span>
+                <h3 className="font-bold text-white">Recent Conversations</h3>
+                <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2">
+                  {chatbotHistory.length === 0 ? (
+                    <p className="text-sm text-slate-500 text-center py-8 italic">No conversations recorded yet.</p>
+                  ) : (
+                    chatbotHistory.map((log, i) => (
+                      <div key={i} className={`bg-slate-800/30 border border-slate-800 rounded-xl p-4 space-y-2 ${log.role === 'assistant' ? 'ml-4 border-purple-500/30' : 'mr-4 border-blue-500/30'}`}>
+                        <div className="flex items-center justify-between text-[10px] text-slate-400">
+                          <span className={`font-semibold uppercase tracking-wider ${log.role === 'assistant' ? 'text-purple-400' : 'text-blue-400'}`}>
+                            {log.role === 'assistant' ? 'AI Assistant' : 'Customer'}
+                          </span>
+                          <span>{new Date(log.created_at).toLocaleString()}</span>
+                        </div>
+                        <p className="text-xs text-white leading-relaxed">{log.content}</p>
                       </div>
-                      <p className="text-sm font-semibold text-white">User: "{log.msg}"</p>
-                      <p className="text-xs text-slate-300 pl-3 border-l-2 border-purple-500">{log.reply}</p>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
 
@@ -769,13 +986,13 @@ export default function Dashboard() {
                 <p className="text-xs text-slate-400">Upgrade or subscribe to one of our premium marketing tiers instantly via Stripe:</p>
                 <div className="grid sm:grid-cols-3 gap-4">
                   <div className={`p-4 rounded-xl border ${business?.tier === 'Starter' ? 'bg-purple-500/10 border-purple-500' : 'bg-slate-900/50 border-slate-800'} space-y-2`}>
-                    <div className="text-sm font-bold text-white">Starter ($99/mo)</div>
-                    <p className="text-xs text-slate-400">AI Social posts, Reviews tracker & chatbot</p>
+                    <div className="text-sm font-bold text-white">Starter ($149.99/mo)</div>
+                    <p className="text-xs text-slate-400">12 AI posts/mo, Review tracker, Chatbot</p>
                     {business?.tier === 'Starter' ? (
                       <span className="inline-block text-xs font-bold text-purple-400 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">Current Plan</span>
                     ) : (
                       <a
-                        href="https://buy.stripe.com/eVq9AT5pd2Ky5XUfgC2go00"
+                        href="https://buy.stripe.com/28EdR96thgBo2LIb0m2go03"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-block text-center w-full bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-1.5 rounded-lg transition"
@@ -785,13 +1002,13 @@ export default function Dashboard() {
                     )}
                   </div>
                   <div className={`p-4 rounded-xl border ${business?.tier === 'Pro' ? 'bg-purple-500/10 border-purple-500' : 'bg-slate-900/50 border-slate-800'} space-y-2`}>
-                    <div className="text-sm font-bold text-white">Pro ($299/mo)</div>
-                    <p className="text-xs text-slate-400">Starter + Instagram bot, SEO report</p>
+                    <div className="text-sm font-bold text-white">Pro ($499.99/mo)</div>
+                    <p className="text-xs text-slate-400">30 posts/mo, IG bot, SEO, WhatsApp, GBP</p>
                     {business?.tier === 'Pro' ? (
                       <span className="inline-block text-xs font-bold text-purple-400 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">Current Plan</span>
                     ) : (
                       <a
-                        href="https://buy.stripe.com/8x2bJ104T4SGcmi2tQ2go01"
+                        href="https://buy.stripe.com/cNi00jdVJetg1HE9Wi2go04"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-block text-center w-full bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold py-1.5 rounded-lg transition"
@@ -801,13 +1018,13 @@ export default function Dashboard() {
                     )}
                   </div>
                   <div className={`p-4 rounded-xl border ${business?.tier === 'Premium' ? 'bg-purple-500/10 border-purple-500' : 'bg-slate-900/50 border-slate-800'} space-y-2`}>
-                    <div className="text-sm font-bold text-white">Premium ($599/mo)</div>
-                    <p className="text-xs text-slate-400">Pro + Dedicated Human review, GBP</p>
+                    <div className="text-sm font-bold text-white">Premium ($999.99/mo)</div>
+                    <p className="text-xs text-slate-400">Unlimited posts, Video, Human review, Priority</p>
                     {business?.tier === 'Premium' ? (
                       <span className="inline-block text-xs font-bold text-purple-400 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">Current Plan</span>
                     ) : (
                       <a
-                        href="https://buy.stripe.com/6oUfZheZNad0aea3xU2go02"
+                        href="https://buy.stripe.com/aFa3cv8Bpad0euq8Se2go05"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-block text-center w-full bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-1.5 rounded-lg transition"

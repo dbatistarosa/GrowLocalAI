@@ -4,7 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import fs from "fs";
 import { query } from "./db.js";
-import { generateSocialPosts, chatWithAI } from "./ai.js";
+import { generateSocialPosts, chatWithAI, generatePromoVideo, supportChatWithAI, generateSEOKeywords, generateGBPContentSuggestions } from "./ai.js";
 
 // Extremely lightweight, zero-dependency .env loader
 try {
@@ -25,7 +25,7 @@ try {
 }
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "growlocal-super-secret-key-2026";
 
 app.use(cors());
@@ -197,22 +197,83 @@ app.get("/api/posts", authenticate, async (req, res) => {
   }
 });
 
+// ---------------- USAGE LIMITS HELPERS ----------------
+
+const PLAN_LIMITS: Record<string, number> = {
+  Starter: 12,
+  Pro: 30,
+  Premium: 999999 // unlimited
+};
+
+async function checkUsageLimit(businessId: string, tier: string, feature: string) {
+  const limit = PLAN_LIMITS[tier] || 12;
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString();
+
+  const usage = await query(`
+    SELECT * FROM subscription_usage 
+    WHERE business_id = '${businessId}' 
+    AND feature = '${feature}' 
+    AND period_start = '${startOfMonth}'
+  `);
+
+  if (!usage || usage.length === 0) {
+    const id = crypto.randomUUID();
+    await query(`
+      INSERT INTO subscription_usage (id, business_id, feature, period_start, period_end, count_used, limit_amount)
+      VALUES ('${id}', '${businessId}', '${feature}', '${startOfMonth}', '${endOfMonth}', 0, ${limit})
+    `);
+    return { current: 0, limit, exceeded: 0 >= limit };
+  }
+
+  const currentUsage = usage[0];
+  return { 
+    current: currentUsage.count_used, 
+    limit: currentUsage.limit_amount, 
+    exceeded: currentUsage.count_used >= currentUsage.limit_amount 
+  };
+}
+
+async function incrementUsage(businessId: string, feature: string) {
+  const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+  await query(`
+    UPDATE subscription_usage 
+    SET count_used = count_used + 1 
+    WHERE business_id = '${businessId}' 
+    AND feature = '${feature}' 
+    AND period_start = '${startOfMonth}'
+  `);
+}
+
 // Generate Social Posts using AI
 app.post("/api/ai/generate-posts", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
 
   try {
-    const businesses = await query(`SELECT name, category FROM businesses WHERE id = '${businessId}'`);
+    const businesses = await query(`SELECT name, category, tier FROM businesses WHERE id = '${businessId}'`);
     if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: "Business not found" });
     }
 
-    const { name, category } = businesses[0];
+    const { name, category, tier } = businesses[0];
+    
+    // Enforce limits
+    const usage = await checkUsageLimit(businessId, tier, 'social_posts');
+    if (usage.exceeded) {
+      return res.status(403).json({ error: "Monthly post limit reached. Please upgrade your plan." });
+    }
+
     const generatedPosts = await generateSocialPosts(businessId, category, name);
+    await incrementUsage(businessId, 'social_posts');
 
     res.status(201).json({
-      message: "Successfully generated 3 social posts",
-      posts: generatedPosts
+      message: "Successfully generated 3 social post options",
+      posts: generatedPosts,
+      usage: {
+        used: usage.current + 1,
+        limit: usage.limit
+      }
     });
   } catch (err) {
     console.error("AI Generation Route Error:", err);
@@ -220,6 +281,211 @@ app.post("/api/ai/generate-posts", authenticate, async (req, res) => {
   }
 });
 
+// Generate Promo Video using AI (Premium)
+app.post("/api/ai/generate-video", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { postContent } = req.body;
+
+  try {
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
+    if (businesses[0]?.tier !== 'Premium') {
+      return res.status(403).json({ error: "Video generation is a Premium feature" });
+    }
+
+    const videoData = await generatePromoVideo(businessId, postContent || "Our latest services");
+    res.status(201).json(videoData);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to generate video" });
+  }
+});
+
+// ---------------- BUSINESS PROFILE ROUTES ----------------
+
+// Update Business Profile
+app.patch("/api/business/profile", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { address, phone, email, website, hours } = req.body;
+
+  try {
+    await query(`
+      UPDATE businesses 
+      SET address = '${(address || "").replace(/'/g, "''")}', 
+          phone = '${(phone || "").replace(/'/g, "''")}', 
+          email = '${(email || "").replace(/'/g, "''")}', 
+          website = '${(website || "").replace(/'/g, "''")}', 
+          hours = '${(hours || "").replace(/'/g, "''")}'
+      WHERE id = '${businessId}'
+    `);
+    res.json({ message: "Profile updated" });
+  } catch (err) {
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
+// Service Catalog
+app.get("/api/business/services", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const services = await query(`SELECT * FROM services WHERE business_id = '${businessId}'`);
+  res.json(services);
+});
+
+app.post("/api/business/services", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { name, description, price, duration } = req.body;
+  const id = crypto.randomUUID();
+
+  try {
+    await query(`
+      INSERT INTO services (id, business_id, name, description, price, duration)
+      VALUES ('${id}', '${businessId}', '${name.replace(/'/g, "''")}', '${(description || "").replace(/'/g, "''")}', ${price || 0}, ${duration || 30})
+    `);
+    res.status(201).json({ id, name });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to add service" });
+  }
+});
+
+// Media Library
+app.get("/api/business/media", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const media = await query(`SELECT * FROM media WHERE business_id = '${businessId}'`);
+  res.json(media);
+});
+
+app.post("/api/business/media", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { url, type } = req.body;
+  const id = crypto.randomUUID();
+
+  try {
+    await query(`INSERT INTO media (id, business_id, url, type) VALUES ('${id}', '${businessId}', '${url}', '${type}')`);
+    res.status(201).json({ id, url });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to add media" });
+  }
+});
+
+// ---------------- SOCIAL WEBHOOKS / DM BOTS ----------------
+
+// Helper to process chat response for special actions (like bookings)
+async function handleChatActions(businessId: string, response: string) {
+  if (response.includes("[BOOKING:")) {
+    try {
+      const bookingJson = response.match(/\[BOOKING:(.*?)\]/)?.[1];
+      if (bookingJson) {
+        const bookingData = JSON.parse(bookingJson);
+        const bookingId = crypto.randomUUID();
+        await query(`
+          INSERT INTO bookings (id, business_id, customer_name, customer_phone, service_id, date, time, status)
+          VALUES ('${bookingId}', '${businessId}', '${(bookingData.name || "").replace(/'/g, "''")}', '${(bookingData.phone || "").replace(/'/g, "''")}', '${(bookingData.service || "").replace(/'/g, "''")}', '${bookingData.date || ""}', '${bookingData.time || ""}', 'pending')
+        `);
+      }
+    } catch (e) {
+      console.error("Booking parse error:", e);
+    }
+  }
+  return response.replace(/\[BOOKING:.*?\]/, "").trim();
+}
+
+// Instagram DM Webhook
+app.post("/api/ai/chat/instagram", async (req, res) => {
+  const { businessId, senderId, message } = req.body;
+  const rawResponse = await chatWithAI(businessId, senderId, message, 'instagram');
+  const response = await handleChatActions(businessId, rawResponse);
+  res.json({ response });
+});
+
+// WhatsApp Webhook
+app.post("/api/ai/chat/whatsapp", async (req, res) => {
+  const { businessId, senderId, message } = req.body;
+  const rawResponse = await chatWithAI(businessId, senderId, message, 'whatsapp');
+  const response = await handleChatActions(businessId, rawResponse);
+  res.json({ response });
+});
+
+// ---------------- SUPPORT SYSTEM ROUTES ----------------
+
+// AI Support Chatbot
+app.post("/api/support/chat", authenticate, async (req, res) => {
+  const { userId } = (req as any).user;
+  const { conversationId, message } = req.body;
+
+  try {
+    const response = await supportChatWithAI(userId, conversationId, message);
+
+    // Check for ticket tag
+    if (response.includes("[TICKET:")) {
+      try {
+        const ticketJson = response.match(/\[TICKET:(.*?)\]/)?.[1];
+        if (ticketJson) {
+          const ticketData = JSON.parse(ticketJson);
+          const ticketId = crypto.randomUUID();
+          await query(`
+            INSERT INTO support_tickets (id, user_id, subject, description, priority, status)
+            VALUES ('${ticketId}', '${userId}', '${(ticketData.subject || "AI Support Request").replace(/'/g, "''")}', 'Opened via AI Support Bot. Last message: ${message.replace(/'/g, "''")}', '${ticketData.priority || "Medium"}', 'Open')
+          `);
+        }
+      } catch (e) {}
+    }
+
+    res.json({ response: response.replace(/\[TICKET:.*?\]/, "").trim() });
+  } catch (err) {
+    res.status(500).json({ error: "Support chat failed" });
+  }
+});
+
+// Support Tickets
+app.get("/api/support/tickets", authenticate, async (req, res) => {
+  const { userId } = (req as any).user;
+  const tickets = await query(`SELECT * FROM support_tickets WHERE user_id = '${userId}' ORDER BY created_at DESC`);
+  res.json(tickets);
+});
+
+app.post("/api/support/tickets", authenticate, async (req, res) => {
+  const { userId } = (req as any).user;
+  const { subject, description, priority } = req.body;
+  const id = crypto.randomUUID();
+
+  try {
+    await query(`
+      INSERT INTO support_tickets (id, user_id, subject, description, priority, status)
+      VALUES ('${id}', '${userId}', '${subject.replace(/'/g, "''")}', '${description.replace(/'/g, "''")}', '${priority || "Medium"}', 'Open')
+    `);
+    res.status(201).json({ id, subject });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create ticket" });
+  }
+});
+// ---------------- SEO INTELLIGENCE ROUTES ----------------
+
+// Generate Keywords
+app.post("/api/seo/keywords", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const keywords = await generateSEOKeywords(businessId);
+    res.json({ keywords });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to generate keywords" });
+  }
+});
+
+// Get SEO Metrics
+app.get("/api/seo/metrics", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const metrics = await query(`SELECT * FROM seo_metrics WHERE business_id = '${businessId}' ORDER BY created_at DESC LIMIT 1`);
+  res.json(metrics[0] || { keywords: "[]", impressions: 0, clicks: 0, views: 0 });
+});
+
+// GBP Suggestions
+app.get("/api/seo/gbp-suggestions", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const suggestions = await generateGBPContentSuggestions(businessId);
+    res.json(suggestions);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to get suggestions" });
+  }
+});
 // AI Chatbot Route
 app.post("/api/ai/chat", async (req, res) => {
   const { businessId, conversationId, message } = req.body;
@@ -229,11 +495,58 @@ app.post("/api/ai/chat", async (req, res) => {
   }
 
   try {
-    const response = await chatWithAI(businessId, conversationId, message);
+    const rawResponse = await chatWithAI(businessId, conversationId, message);
+    const response = await handleChatActions(businessId, rawResponse);
     res.json({ response });
   } catch (err) {
     res.status(500).json({ error: "Chat failed" });
   }
+});
+
+// ---------------- CALENDAR & BOOKING ROUTES ----------------
+
+app.get("/api/bookings", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const bookings = await query(`SELECT * FROM bookings WHERE business_id = '${businessId}' ORDER BY date ASC, time ASC`);
+  res.json(bookings);
+});
+
+app.patch("/api/bookings/:id", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    // Verify ownership
+    const booking = await query(`SELECT * FROM bookings WHERE id = '${id}' AND business_id = '${businessId}'`);
+    if (!booking || booking.length === 0) return res.status(404).json({ error: "Booking not found" });
+
+    await query(`UPDATE bookings SET status = '${status}' WHERE id = '${id}'`);
+
+    // If completed, track income
+    if (status === 'completed') {
+      const serviceId = booking[0].service_id;
+      const services = await query(`SELECT price FROM services WHERE name = '${serviceId.replace(/'/g, "''")}' OR id = '${serviceId}'`);
+      const price = services[0]?.price || 0;
+      
+      const incomeId = crypto.randomUUID();
+      await query(`
+        INSERT INTO income (id, business_id, booking_id, amount, status)
+        VALUES ('${incomeId}', '${businessId}', '${id}', ${price}, 'received')
+      `);
+    }
+
+    res.json({ message: "Booking updated" });
+  } catch (err) {
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
+app.get("/api/income", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const income = await query(`SELECT * FROM income WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+  const total = await query(`SELECT SUM(amount) as total FROM income WHERE business_id = '${businessId}'`);
+  res.json({ history: income, total: total[0]?.total || 0 });
 });
 
 // Get Chat History for Business
@@ -271,6 +584,29 @@ app.get("/api/ai/chatbot/snippet", authenticate, async (req, res) => {
   `.trim();
 
   res.json({ snippet });
+});
+
+// Update Chatbot Config
+app.patch("/api/ai/chatbot/config", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { config } = req.body;
+
+  if (!config) {
+    return res.status(400).json({ error: "Missing config data" });
+  }
+
+  try {
+    const configString = JSON.stringify(config);
+    await query(`
+      UPDATE businesses 
+      SET chatbot_config = '${configString.replace(/'/g, "''")}'
+      WHERE id = '${businessId}'
+    `);
+    res.json({ message: "Chatbot configuration updated successfully" });
+  } catch (err) {
+    console.error("Update chatbot config error:", err);
+    res.status(500).json({ error: "Failed to update chatbot configuration" });
+  }
 });
 
 // Get Reviews for Business (with optional request link info)
@@ -612,22 +948,864 @@ app.post("/api/reviews/request", authenticate, async (req, res) => {
   }
 });
 
+// ---- STRIPE BILLING INTEGRATION ----
+
+// Stripe plan configuration - UPDATED PRICING
+// Old prices: Starter $99, Pro $299, Premium $599
+// New prices: Starter $149.99, Pro $499.99, Premium $999.99
+const STRIPE_PLANS = {
+  Starter: {
+    id: "Starter",
+    price: 149.99,
+    priceId: "price_1TjPVMDwVs5LOLSiu0vA3lKA",
+    checkoutUrl: "https://buy.stripe.com/28EdR96thgBo2LIb0m2go03",
+    features: ["12 AI Social Posts/mo", "Automated Review Requests", "Basic Website Chatbot", "1 Instagram Connection"]
+  },
+  Pro: {
+    id: "Pro",
+    price: 499.99,
+    priceId: "price_1TjPVMDwVs5LOLSiewrI25j5",
+    checkoutUrl: "https://buy.stripe.com/cNi00jdVJetg1HE9Wi2go04",
+    features: ["30 AI Social Posts/mo", "AI Instagram DM Chatbot", "WhatsApp Automation", "GBP Management", "SEO Dashboard", "Calendar Reservations"]
+  },
+  Premium: {
+    id: "Premium",
+    price: 999.99,
+    priceId: "price_1TjPVMDwVs5LOLSiNDtJVWPv",
+    checkoutUrl: "https://buy.stripe.com/aFa3cv8Bpad0euq8Se2go05",
+    features: ["Unlimited AI Posts", "AI Video Creation", "Human Review of Content", "Competitor Tracking", "Income Tracking", "Priority Support"]
+  }
+};
+
+// Tiers configuration for feature access and limits
+const TIER_LIMITS = {
+  Starter: {
+    label: "Starter",
+    postsPerMonth: 12,
+    videosPerMonth: 0,
+    chatbotCount: 1,
+    instagramConnections: 1,
+    gbpManagement: false,
+    calendar: false,
+    whatsapp: false,
+    competitorTracking: false,
+    incomeTracking: false,
+    tabs: ["overview", "social", "reviews", "support", "settings"]
+  },
+  Pro: {
+    label: "Pro",
+    postsPerMonth: 30,
+    videosPerMonth: 0,
+    chatbotCount: 1,
+    instagramConnections: 1,
+    gbpManagement: true,
+    calendar: true,
+    whatsapp: true,
+    competitorTracking: false,
+    incomeTracking: false,
+    tabs: ["overview", "social", "reviews", "chatbot", "seo", "support", "settings"]
+  },
+  Premium: {
+    label: "Premium",
+    postsPerMonth: -1, // unlimited
+    videosPerMonth: -1, // unlimited
+    chatbotCount: -1, // unlimited
+    instagramConnections: -1, // unlimited
+    gbpManagement: true,
+    calendar: true,
+    whatsapp: true,
+    competitorTracking: true,
+    incomeTracking: true,
+    tabs: ["overview", "social", "reviews", "chatbot", "seo", "competitors", "income", "support", "settings"]
+  }
+};
+
+// Get billing plans and status
+app.get("/api/billing/plans", (_req, res) => {
+  res.json({
+    plans: Object.values(STRIPE_PLANS),
+    // Strip price IDs from public response for security
+    public: Object.entries(STRIPE_PLANS).map(([key, plan]) => ({
+      id: plan.id,
+      name: key,
+      price: plan.price,
+      checkoutUrl: plan.checkoutUrl,
+      features: plan.features
+    }))
+  });
+});
+
+// Get current subscription status
+app.get("/api/billing/status", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const businesses = await query(`SELECT tier, stripe_customer_id, stripe_subscription_id, stripe_subscription_status FROM businesses WHERE id = '${businessId}'`);
+    if (!businesses || businesses.length === 0) {
+      return res.status(404).json({ error: "Business not found" });
+    }
+    const biz = businesses[0];
+    const plans = Object.values(STRIPE_PLANS).map(p => ({
+      id: p.id,
+      name: p.id,
+      price: p.price,
+      checkoutUrl: p.checkoutUrl,
+      features: p.features
+    }));
+    res.json({
+      currentPlan: biz.tier || "Starter",
+      subscriptionStatus: biz.stripe_subscription_status || "incomplete",
+      stripeCustomerId: biz.stripe_customer_id,
+      stripeSubscriptionId: biz.stripe_subscription_id,
+      plans,
+      isActive: biz.stripe_subscription_status === "active" || biz.stripe_subscription_status === "trialing" || !biz.stripe_subscription_id
+    });
+  } catch (err) {
+    console.error("Billing status error:", err);
+    res.status(500).json({ error: "Failed to fetch billing status" });
+  }
+});
+
+// ---- NEW PLATFORM OVERHAUL ENDPOINTS ----
+
+// Services
+app.get("/api/services", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const services = await query(`SELECT * FROM services WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+    res.json(services);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch services" });
+  }
+});
+
+app.post("/api/services", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { name, description, price, duration } = req.body;
+  if (!name || price === undefined || !duration) {
+    return res.status(400).json({ error: "Name, price, and duration are required" });
+  }
+  try {
+    const id = crypto.randomUUID();
+    await query(`
+      INSERT INTO services (id, business_id, name, description, price, duration)
+      VALUES ('${id}', '${businessId}', '${name.replace(/'/g, "''")}', '${(description || "").replace(/'/g, "''")}', ${Number(price)}, ${Number(duration)})
+    `);
+    res.status(201).json({ id, name, description, price, duration });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create service" });
+  }
+});
+
+app.delete("/api/services/:id", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  try {
+    await query(`DELETE FROM services WHERE id = '${id}' AND business_id = '${businessId}'`);
+    res.json({ message: "Service deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete service" });
+  }
+});
+
+// Bookings
+app.get("/api/bookings", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const bookings = await query(`
+      SELECT b.*, s.name as service_name, s.price as service_price 
+      FROM bookings b
+      LEFT JOIN services s ON b.service_id = s.id
+      WHERE b.business_id = '${businessId}'
+      ORDER BY b.date ASC, b.time ASC
+    `);
+    res.json(bookings);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch bookings" });
+  }
+});
+
+app.post("/api/bookings", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { customerName, customerEmail, customerPhone, serviceId, date, time, status } = req.body;
+  if (!customerName || !date || !time) {
+    return res.status(400).json({ error: "Customer name, date, and time are required" });
+  }
+  try {
+    const id = crypto.randomUUID();
+    const bookingStatus = status || "confirmed";
+    await query(`
+      INSERT INTO bookings (id, business_id, customer_name, customer_email, customer_phone, service_id, date, time, status)
+      VALUES ('${id}', '${businessId}', '${customerName.replace(/'/g, "''")}', ${customerEmail ? `'${customerEmail.replace(/'/g, "''")}'` : "NULL"}, ${customerPhone ? `'${customerPhone.replace(/'/g, "''")}'` : "NULL"}, ${serviceId ? `'${serviceId}'` : "NULL"}, '${date}', '${time}', '${bookingStatus}')
+    `);
+    res.status(201).json({ id, customerName, customerEmail, customerPhone, serviceId, date, time, status: bookingStatus });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create booking" });
+  }
+});
+
+app.patch("/api/bookings/:id", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: "Status is required" });
+  try {
+    await query(`UPDATE bookings SET status = '${status}' WHERE id = '${id}' AND business_id = '${businessId}'`);
+    res.json({ message: "Booking updated successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update booking" });
+  }
+});
+
+// Social Accounts
+app.get("/api/social-accounts", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const accounts = await query(`SELECT * FROM social_accounts WHERE business_id = '${businessId}'`);
+    res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch social accounts" });
+  }
+});
+
+app.post("/api/social-accounts/connect", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { platform, username } = req.body;
+  if (!platform) return res.status(400).json({ error: "Platform is required" });
+  try {
+    const id = crypto.randomUUID();
+    const existing = await query(`SELECT id FROM social_accounts WHERE business_id = '${businessId}' AND platform = '${platform}'`);
+    if (existing && existing.length > 0) {
+      await query(`UPDATE social_accounts SET status = 'connected', username = ${username ? `'${username}'` : "NULL"} WHERE id = '${existing[0].id}'`);
+      return res.json({ message: "Social account connected successfully" });
+    }
+    await query(`
+      INSERT INTO social_accounts (id, business_id, platform, username, status)
+      VALUES ('${id}', '${businessId}', '${platform}', ${username ? `'${username}'` : "NULL"}, 'connected')
+    `);
+    res.status(201).json({ id, platform, username, status: "connected" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to connect social account" });
+  }
+});
+
+app.post("/api/social-accounts/disconnect", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { platform } = req.body;
+  try {
+    await query(`DELETE FROM social_accounts WHERE business_id = '${businessId}' AND platform = '${platform}'`);
+    res.json({ message: "Social account disconnected successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to disconnect social account" });
+  }
+});
+
+// Media Library
+app.get("/api/media", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const media = await query(`SELECT * FROM media WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+    res.json(media);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch media library" });
+  }
+});
+
+app.post("/api/media", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { url, type, name } = req.body;
+  if (!url || !type) return res.status(400).json({ error: "URL and type are required" });
+  try {
+    const id = crypto.randomUUID();
+    await query(`
+      INSERT INTO media (id, business_id, url, type, name)
+      VALUES ('${id}', '${businessId}', '${url}', '${type}', ${name ? `'${name.replace(/'/g, "''")}'` : "NULL"})
+    `);
+    res.status(201).json({ id, url, type, name });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to add media" });
+  }
+});
+
+// Support Tickets
+app.get("/api/tickets", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const tickets = await query(`SELECT * FROM support_tickets WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+    res.json(tickets);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch support tickets" });
+  }
+});
+
+app.post("/api/tickets", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { subject, message } = req.body;
+  if (!subject || !message) return res.status(400).json({ error: "Subject and message are required" });
+  try {
+    const id = crypto.randomUUID();
+    await query(`
+      INSERT INTO support_tickets (id, business_id, subject, message, status)
+      VALUES ('${id}', '${businessId}', '${subject.replace(/'/g, "''")}', '${message.replace(/'/g, "''")}', 'open')
+    `);
+    res.status(201).json({ id, subject, message, status: "open" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create support ticket" });
+  }
+});
+
+// Business Profile Update
+app.patch("/api/business/profile", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { name, phone, email, address, website, hours, target_areas, logo_url } = req.body;
+  try {
+    const updates: string[] = [];
+    if (name) updates.push(`name = '${name.replace(/'/g, "''")}'`);
+    if (phone !== undefined) updates.push(`phone = ${phone ? `'${phone.replace(/'/g, "''")}'` : "NULL"}`);
+    if (email !== undefined) updates.push(`email = ${email ? `'${email.replace(/'/g, "''")}'` : "NULL"}`);
+    if (address !== undefined) updates.push(`address = ${address ? `'${address.replace(/'/g, "''")}'` : "NULL"}`);
+    if (website !== undefined) updates.push(`website = ${website ? `'${website.replace(/'/g, "''")}'` : "NULL"}`);
+    if (hours !== undefined) updates.push(`hours = ${hours ? `'${hours.replace(/'/g, "''")}'` : "NULL"}`);
+    if (target_areas !== undefined) updates.push(`target_areas = ${target_areas ? `'${target_areas.replace(/'/g, "''")}'` : "NULL"}`);
+    if (logo_url !== undefined) updates.push(`logo_url = ${logo_url ? `'${logo_url.replace(/'/g, "''")}'` : "NULL"}`);
+    
+    if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
+    
+    await query(`
+      UPDATE businesses 
+      SET ${updates.join(", ")}
+      WHERE id = '${businessId}'
+    `);
+    res.json({ message: "Business profile updated successfully" });
+  } catch (err) {
+    console.error("Update business profile error:", err);
+    res.status(500).json({ error: "Failed to update business profile" });
+  }
+});
+
+// Social Posts Actions
+app.patch("/api/posts/:id", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  const { status, scheduled_at, content } = req.body;
+  try {
+    const updates: string[] = [];
+    if (status) updates.push(`status = '${status}'`);
+    if (scheduled_at) updates.push(`scheduled_at = '${scheduled_at}'`);
+    if (content) updates.push(`content = '${content.replace(/'/g, "''")}'`);
+    
+    if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
+    
+    await query(`UPDATE posts SET ${updates.join(", ")} WHERE id = '${id}' AND business_id = '${businessId}'`);
+    res.json({ message: "Post updated successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update post" });
+  }
+});
+
+app.delete("/api/posts/:id", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  try {
+    await query(`DELETE FROM posts WHERE id = '${id}' AND business_id = '${businessId}'`);
+    res.json({ message: "Post deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete post" });
+  }
+});
+
+app.post("/api/posts/create", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { content, imageUrl, scheduledAt, status } = req.body;
+  if (!content) return res.status(400).json({ error: "Content is required" });
+  try {
+    const id = crypto.randomUUID();
+    const postStatus = status || "scheduled";
+    await query(`
+      INSERT INTO posts (id, business_id, content, image_url, scheduled_at, status)
+      VALUES ('${id}', '${businessId}', '${content.replace(/'/g, "''")}', ${imageUrl ? `'${imageUrl}'` : "NULL"}, ${scheduledAt ? `'${scheduledAt}'` : "NULL"}, '${postStatus}')
+    `);
+    res.status(201).json({ id, content, image_url: imageUrl, scheduled_at: scheduledAt, status: postStatus });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create post" });
+  }
+});
+
+app.post("/api/posts/:id/regenerate", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  const { tone } = req.body;
+  try {
+    const posts_ = await query(`SELECT * FROM posts WHERE id = '${id}' AND business_id = '${businessId}'`);
+    if (!posts_ || posts_.length === 0) return res.status(404).json({ error: "Post not found" });
+    
+    const businesses = await query(`SELECT category, name FROM businesses WHERE id = '${businessId}'`);
+    const { category, name } = businesses[0];
+    
+    const { default: OpenAI } = await import("openai");
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: `You are an expert social media marketer. Regenerate a social media caption for a local ${category} business named "${name}".` },
+        { role: "user", content: `Please write a new scroll-stopping, high-converting social media post caption. Tone style requested: ${tone || "engaging"}. Include hooks, hashtags, emojis, and a clear call to action. Keep it clean and ready to publish.` }
+      ]
+    });
+    const newContent = response.choices[0].message.content || posts_[0].content;
+    
+    await query(`UPDATE posts SET content = '${newContent.replace(/'/g, "''")}' WHERE id = '${id}'`);
+    res.json({ id, content: newContent, image_url: posts_[0].image_url });
+  } catch (err) {
+    console.error("Regenerate post error:", err);
+    res.status(500).json({ error: "Failed to regenerate post" });
+  }
+});
+
+app.post("/api/posts/:id/generate-video", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  try {
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
+    if (!businesses || businesses[0].tier !== "Premium") {
+      return res.status(403).json({ error: "AI Video generation is only available on the Premium plan." });
+    }
+    const posts_ = await query(`SELECT content FROM posts WHERE id = '${id}' AND business_id = '${businessId}'`);
+    if (!posts_ || posts_.length === 0) return res.status(404).json({ error: "Post not found" });
+    
+    const videoData = await generatePromoVideo(businessId, posts_[0].content);
+    res.json(videoData);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to generate AI video" });
+  }
+});
+
+// Admin Panel
+app.get("/api/admin/businesses", authenticate, async (req, res) => {
+  try {
+    const data = await query(`
+      SELECT b.*, u.email as user_email, u.name as user_name,
+             (SELECT COUNT(*) FROM posts WHERE business_id = b.id) as post_count,
+             (SELECT COUNT(*) FROM bookings WHERE business_id = b.id) as booking_count,
+             (SELECT COUNT(*) FROM reviews WHERE business_id = b.id) as review_count
+      FROM businesses b
+      LEFT JOIN users u ON u.business_id = b.id
+    `);
+    res.json(data);
+  } catch (err) {
+    console.error("Admin fetch businesses error:", err);
+    res.status(500).json({ error: "Failed to fetch admin businesses data" });
+  }
+});
+
+app.get("/api/admin/tickets", authenticate, async (req, res) => {
+  try {
+    const data = await query(`
+      SELECT t.*, b.name as business_name 
+      FROM support_tickets t
+      LEFT JOIN businesses b ON t.business_id = b.id
+      ORDER BY t.created_at DESC
+    `);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch admin tickets" });
+  }
+});
+
+app.patch("/api/admin/tickets/:id", authenticate, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: "Status is required" });
+  try {
+    await query(`UPDATE support_tickets SET status = '${status}' WHERE id = '${id}'`);
+    res.json({ message: "Ticket updated successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update ticket" });
+  }
+});
+
+// Get checkout URL for a specific plan (with user info pre-filled)
+app.post("/api/billing/create-checkout", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { planId } = req.body;
+
+  if (!planId || !STRIPE_PLANS[planId as keyof typeof STRIPE_PLANS]) {
+    return res.status(400).json({ error: "Invalid plan. Choose Starter, Pro, or Premium." });
+  }
+
+  try {
+    // Get user email for pre-fill
+    const users = await query(`SELECT email FROM users WHERE business_id = '${businessId}'`);
+    const email = users && users.length > 0 ? users[0].email : "";
+
+    // Get the Stripe payment link and append prefilled params
+    const plan = STRIPE_PLANS[planId as keyof typeof STRIPE_PLANS];
+    const baseUrl = getBaseUrl(req);
+
+    // Stripe hosted checkout page with pre-fill and redirect
+    const stripeCheckoutUrl = `${plan.checkoutUrl}?prefilled_email=${encodeURIComponent(email)}&client_reference_id=${businessId}&redirect_url=${encodeURIComponent(`${baseUrl}/billing/success?plan=${planId}&business_id=${businessId}`)}`;
+
+    res.json({
+      url: stripeCheckoutUrl,
+      plan: plan.id,
+      price: plan.price
+    });
+  } catch (err) {
+    console.error("Create checkout error:", err);
+    res.status(500).json({ error: "Failed to create checkout session" });
+  }
+});
+
+// Handle Stripe checkout success redirect
+app.get("/billing/success", async (req, res) => {
+  const { plan, business_id } = req.query;
+
+  if (plan && business_id) {
+    try {
+      // Update the business tier in our database
+      await query(`
+        UPDATE businesses SET tier = '${(plan as string).replace(/'/g, "''")}', stripe_subscription_status = 'active'
+        WHERE id = '${(business_id as string).replace(/'/g, "''")}'
+      `);
+      console.log(`Business ${business_id} upgraded to ${plan} plan`);
+    } catch (err) {
+      console.error("Failed to update tier after checkout:", err);
+    }
+  }
+
+  // Redirect to dashboard
+  res.redirect("/dashboard");
+});
+
+// Stripe Webhook endpoint for subscription status changes
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"] as string;
+
+  // If no Stripe key configured, log and acknowledge
+  if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY.startsWith("sk_live_placeholder")) {
+    console.log("Webhook received (raw mode):", req.body.toString().substring(0, 200));
+    return res.json({ received: true });
+  }
+
+  try {
+    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    } catch (err: any) {
+      console.error("Webhook signature verification failed:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Handle the event
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        const businessId = session.client_reference_id;
+        const tier = session.metadata?.tier || getTierFromPrice(session.amount_subtotal);
+
+        if (businessId) {
+          await query(`
+            UPDATE businesses SET 
+              tier = '${tier}',
+              stripe_customer_id = '${session.customer?.replace(/'/g, "''") || ""}',
+              stripe_subscription_id = '${session.subscription?.replace(/'/g, "''") || ""}',
+              stripe_subscription_status = 'active'
+            WHERE id = '${businessId.replace(/'/g, "''")}'
+          `);
+          console.log(`Business ${businessId} subscribed to ${tier}`);
+        }
+        break;
+      }
+      case "customer.subscription.updated":
+      case "customer.subscription.deleted": {
+        const subscription = event.data.object;
+        const status = subscription.status; // active, past_due, canceled, incomplete, trialing
+
+        // Find and update the business by subscription ID
+        const businesses = await query(`SELECT id FROM businesses WHERE stripe_subscription_id = '${subscription.id}'`);
+        if (businesses && businesses.length > 0) {
+          await query(`
+            UPDATE businesses SET stripe_subscription_status = '${status}'
+            WHERE id = '${businesses[0].id}'
+          `);
+          console.log(`Subscription ${subscription.id} status updated to ${status}`);
+        }
+        break;
+      }
+      case "invoice.payment_failed": {
+        const invoice = event.data.object;
+        const businesses = await query(`SELECT id FROM businesses WHERE stripe_subscription_id = '${invoice.subscription}'`);
+        if (businesses && businesses.length > 0) {
+          await query(`
+            UPDATE businesses SET stripe_subscription_status = 'past_due'
+            WHERE id = '${businesses[0].id}'
+          `);
+        }
+        break;
+      }
+      default:
+        console.log(`Unhandled event type: ${event.type}`);
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("Webhook error:", err);
+    res.status(400).send(`Webhook Error: ${err}`);
+  }
+});
+
+// Helper to map Stripe amounts to tiers
+function getTierFromPrice(amountCents: number): string {
+  if (amountCents === 14999) return "Starter";
+  if (amountCents === 49999) return "Pro";
+  if (amountCents === 99999) return "Premium";
+  if (amountCents === 9900) return "Starter"; // legacy
+  if (amountCents === 29900) return "Pro"; // legacy
+  if (amountCents === 59900) return "Premium"; // legacy
+  return "Starter";
+}
+
+// ---- SUBSCRIPTION LIMITS & FEATURE ACCESS ENGINE ----
+
+// Get tier limits for current business
+app.get("/api/subscription/limits", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const businesses = await query(`SELECT tier, subscription_current_period_start, subscription_current_period_end FROM businesses WHERE id = '${businessId}'`);
+    const biz = businesses?.[0] || { tier: "Starter" };
+    const tier = (biz.tier as string) || "Starter";
+    const limits = TIER_LIMITS[tier as keyof typeof TIER_LIMITS] || TIER_LIMITS.Starter;
+
+    // Get current usage counts
+    const now = new Date().toISOString().split("T")[0];
+    const usage = await query(`
+      SELECT feature, count_used, limit_amount
+      FROM subscription_usage
+      WHERE business_id = '${businessId}' AND period_start <= '${now}' AND period_end >= '${now}'
+    `);
+
+    const usageMap: Record<string, any> = {};
+    (usage || []).forEach((u: any) => {
+      usageMap[u.feature] = { used: u.count_used, limit: u.limit_amount };
+    });
+
+    res.json({
+      tier,
+      limits,
+      usage: usageMap,
+      periodStart: biz.subscription_current_period_start,
+      periodEnd: biz.subscription_current_period_end,
+      tabs: limits.tabs
+    });
+  } catch (err) {
+    console.error("Subscription limits error:", err);
+    res.status(500).json({ error: "Failed to load limits" });
+  }
+});
+
+// Increment usage counter
+app.post("/api/subscription/usage/increment", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { feature } = req.body;
+
+  if (!feature) return res.status(400).json({ error: "Feature name required" });
+
+  try {
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
+    const tier = (businesses?.[0]?.tier as string) || "Starter";
+    const limits = TIER_LIMITS[tier as keyof typeof TIER_LIMITS] || TIER_LIMITS.Starter;
+    const limitKey = `${feature}PerMonth` as keyof typeof limits;
+    const limitAmount = (limits[limitKey] as number) ?? -1;
+
+    if (limitAmount === 0) {
+      return res.status(403).json({ error: `${feature} not available on your ${tier} plan`, upgrade: true });
+    }
+
+    // Get or create current period usage
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split("T")[0];
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split("T")[0];
+
+    const existing = await query(`
+      SELECT id, count_used FROM subscription_usage
+      WHERE business_id = '${businessId}' AND feature = '${feature}' AND period_start = '${monthStart}'
+    `);
+
+    if (existing && existing.length > 0) {
+      const current = existing[0] as any;
+      if (limitAmount > 0 && current.count_used >= limitAmount) {
+        return res.status(403).json({ error: `Monthly ${feature} limit reached (${current.count_used}/${limitAmount})`, upgrade: true });
+      }
+      await query(`UPDATE subscription_usage SET count_used = count_used + 1 WHERE id = '${current.id}'`);
+      res.json({ used: current.count_used + 1, limit: limitAmount });
+    } else {
+      const id = crypto.randomUUID();
+      await query(`
+        INSERT INTO subscription_usage (id, business_id, feature, period_start, period_end, count_used, limit_amount)
+        VALUES ('${id}', '${businessId}', '${feature}', '${monthStart}', '${monthEnd}', 1, ${limitAmount})
+      `);
+      res.json({ used: 1, limit: limitAmount });
+    }
+  } catch (err) {
+    console.error("Usage increment error:", err);
+    res.status(500).json({ error: "Failed to update usage" });
+  }
+});
+
+// Check feature access
+app.post("/api/subscription/check-access", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { feature } = req.body;
+  if (!feature) return res.status(400).json({ error: "Feature name required" });
+
+  try {
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
+    const tier = (businesses?.[0]?.tier as string) || "Starter";
+    const limits = TIER_LIMITS[tier as keyof typeof TIER_LIMITS] || TIER_LIMITS.Starter;
+
+    // Check boolean features
+    const boolKeys: Record<string, keyof typeof limits> = {
+      "gbp": "gbpManagement",
+      "calendar": "calendar",
+      "whatsapp": "whatsapp",
+      "competitors": "competitorTracking",
+      "income": "incomeTracking"
+    };
+
+    const boolKey = boolKeys[feature];
+    if (boolKey) {
+      const hasAccess = limits[boolKey] === true;
+      return res.json({ feature, tier, hasAccess, limit: hasAccess ? -1 : 0 });
+    }
+
+    // Check quantified features
+    const limitKey = `${feature}PerMonth` as keyof typeof limits;
+    const limitAmount = (limits[limitKey] as number) ?? -1;
+    res.json({ feature, tier, hasAccess: limitAmount !== 0, limit: limitAmount });
+  } catch (err) {
+    console.error("Access check error:", err);
+    res.status(500).json({ error: "Failed to check access" });
+  }
+});
+
+// ---- INTEGRATION FRAMEWORK (Instagram / GBP / Twilio) ----
+
+// Create social_connections table for storing OAuth tokens
+// Social connections status endpoint
+app.get("/api/integrations/status", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  try {
+    const connections = await query(`
+      SELECT platform, connected, username, connected_at, expires_at
+      FROM social_connections
+      WHERE business_id = '${businessId}'
+    `);
+    res.json({
+      integrations: [
+        {
+          platform: "instagram",
+          name: "Instagram",
+          connected: (connections || []).some((c: any) => c.platform === "instagram" && c.connected),
+          enabled: true,
+          docsUrl: "https://developers.facebook.com/docs/instagram-basic-display-api/",
+          credentialsNeeded: ["Instagram App ID", "Instagram App Secret"]
+        },
+        {
+          platform: "google_business_profile",
+          name: "Google Business Profile",
+          connected: (connections || []).some((c: any) => c.platform === "google_business_profile" && c.connected),
+          enabled: true,
+          docsUrl: "https://developers.google.com/my-business",
+          credentialsNeeded: ["Google Cloud Project ID", "OAuth Client ID", "OAuth Client Secret"]
+        },
+        {
+          platform: "twilio",
+          name: "Twilio (SMS & WhatsApp)",
+          connected: (connections || []).some((c: any) => c.platform === "twilio" && c.connected),
+          enabled: true,
+          docsUrl: "https://www.twilio.com/docs",
+          credentialsNeeded: ["Twilio Account SID", "Twilio Auth Token", "Twilio Phone Number"]
+        }
+      ],
+      details: connections || []
+    });
+  } catch (err) {
+    console.error("Integration status error:", err);
+    res.status(500).json({ error: "Failed to fetch integration status" });
+  }
+});
+
+// Instagram connect endpoint (stub - redirect to OAuth)
+app.get("/api/integrations/instagram/connect", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  // In production, redirect to Instagram OAuth:
+  // `https://api.instagram.com/oauth/authorize?client_id=APP_ID&redirect_uri=CALLBACK&scope=user_profile,user_media&response_type=code`
+  res.json({
+    message: "Instagram connection stub - replace with real OAuth URL",
+    oauthUrl: `https://api.instagram.com/oauth/authorize?client_id=YOUR_APP_ID&redirect_uri=${encodeURIComponent(`${getBaseUrl(req)}/api/integrations/instagram/callback`)}&scope=user_profile,user_media&response_type=code`,
+    status: "requires_app_credentials",
+    credentialsNeeded: ["Instagram App ID (from Meta Developer Portal)", "Instagram App Secret"]
+  });
+});
+
+// Instagram OAuth callback stub
+app.get("/api/integrations/instagram/callback", async (req, res) => {
+  const { code, state } = req.query;
+  res.json({
+    message: "Instagram OAuth callback received",
+    code: code ? "received" : "missing",
+    nextStep: "Exchange code for access token using App ID + App Secret",
+    status: "stub_mode"
+  });
+});
+
+// Google Business Profile connect stub
+app.get("/api/integrations/gbp/connect", authenticate, async (req, res) => {
+  res.json({
+    message: "Google Business Profile connection stub",
+    oauthUrl: `https://accounts.google.com/o/oauth2/v2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=${encodeURIComponent(`${getBaseUrl(req)}/api/integrations/gbp/callback`)}&scope=https://www.googleapis.com/auth/business.manage&response_type=code&access_type=offline`,
+    status: "requires_google_credentials",
+    credentialsNeeded: ["Google Cloud Project ID", "OAuth Client ID", "OAuth Client Secret"]
+  });
+});
+
+// GB P OAuth callback stub
+app.get("/api/integrations/gbp/callback", async (req, res) => {
+  const { code } = req.query;
+  res.json({
+    message: "GBP OAuth callback received",
+    code: code ? "received" : "missing",
+    nextStep: "Exchange code for access + refresh tokens",
+    status: "stub_mode"
+  });
+});
+
+// Twilio connect stub
+app.get("/api/integrations/twilio/status", authenticate, async (req, res) => {
+  res.json({
+    message: "Twilio integration stub",
+    status: "requires_credentials",
+    configured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+    credentialsNeeded: ["Twilio Account SID", "Twilio Auth Token", "Twilio Phone Number"],
+    note: "Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER to .env to activate"
+  });
+});
+
 // Serve Static Frontend Assets in Production
 const frontendDistPath = path.join(process.cwd(), "../frontend/dist");
 app.use(express.static(frontendDistPath));
 
 // Fallback all non-API GET requests to React's index.html
 app.get("*", (req, res) => {
-  if (!req.url.startsWith("/api") && !req.url.startsWith("/r/")) {
+  if (!req.url.startsWith("/api") && !req.url.startsWith("/r/") && !req.url.startsWith("/billing/")) {
     res.sendFile(path.join(frontendDistPath, "index.html"), (err) => {
       if (err) {
         res.status(404).send("Site is building, please refresh in a moment!");
       }
     });
-  } else if (!req.url.startsWith("/api")) {
-    return;
   } else {
-    res.status(404).json({ error: "Not found" });
+    // Already handled by API or /r/ or /billing/ routes above
+    return;
   }
 });
 
