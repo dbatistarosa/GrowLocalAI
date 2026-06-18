@@ -1226,34 +1226,7 @@ app.post("/api/media", authenticate, async (req, res) => {
   }
 });
 
-// Support Tickets
-app.get("/api/tickets", authenticate, async (req, res) => {
-  const { businessId } = (req as any).user;
-  try {
-    const tickets = await query(`SELECT * FROM support_tickets WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
-    res.json(tickets);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch support tickets" });
-  }
-});
-
-app.post("/api/tickets", authenticate, async (req, res) => {
-  const { businessId } = (req as any).user;
-  const { subject, message } = req.body;
-  if (!subject || !message) return res.status(400).json({ error: "Subject and message are required" });
-  try {
-    const id = crypto.randomUUID();
-    await query(`
-      INSERT INTO support_tickets (id, business_id, subject, message, status)
-      VALUES ('${id}', '${businessId}', '${subject.replace(/'/g, "''")}', '${message.replace(/'/g, "''")}', 'open')
-    `);
-    res.status(201).json({ id, subject, message, status: "open" });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to create support ticket" });
-  }
-});
-
-// Business Profile Update
+// ---------------- BUSINESS PROFILE ROUTES ----------------
 app.patch("/api/business/profile", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { name, phone, email, address, website, hours, target_areas, logo_url } = req.body;
@@ -1401,7 +1374,8 @@ app.get("/api/admin/tickets", authenticate, async (req, res) => {
     const data = await query(`
       SELECT t.*, b.name as business_name 
       FROM support_tickets t
-      LEFT JOIN businesses b ON t.business_id = b.id
+      LEFT JOIN users u ON t.user_id = u.id
+      LEFT JOIN businesses b ON u.business_id = b.id
       ORDER BY t.created_at DESC
     `);
     res.json(data);

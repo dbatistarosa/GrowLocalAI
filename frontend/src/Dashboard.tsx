@@ -58,7 +58,7 @@ interface ReviewRequestStats {
 interface SupportTicket {
   id: string;
   subject: string;
-  message: string;
+  description: string;
   status: string;
   created_at: string;
 }
@@ -202,7 +202,7 @@ export default function Dashboard() {
         }
 
         // Fetch Support Tickets
-        const ticketsRes = await fetch("/api/tickets", {
+        const ticketsRes = await fetch("/api/support/tickets", {
           headers: { Authorization: `Bearer ${t}` }
         });
         if (ticketsRes.ok) {
@@ -397,13 +397,13 @@ export default function Dashboard() {
     setCreatingTicket(true);
     const t = token();
     try {
-      const res = await fetch("/api/tickets", {
+      const res = await fetch("/api/support/tickets", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${t}`
         },
-        body: JSON.stringify({ subject: newTicketSubject, message: newTicketMessage })
+        body: JSON.stringify({ subject: newTicketSubject, description: newTicketMessage })
       });
       if (res.ok) {
         const newTicket = await res.json();
@@ -1073,7 +1073,7 @@ export default function Dashboard() {
                               {ticket.status}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-400 line-clamp-2">{ticket.message}</p>
+                          <p className="text-[11px] text-slate-400 line-clamp-2">{ticket.description}</p>
                           <div className="text-[10px] text-slate-500">{new Date(ticket.created_at).toLocaleDateString()}</div>
                         </div>
                       ))
