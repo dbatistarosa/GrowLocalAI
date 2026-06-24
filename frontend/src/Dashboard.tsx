@@ -1,5 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import SettingsPage from "./SettingsPage";
+import CalendarPage from "./CalendarPage";
+import OverviewDashboard from "./OverviewDashboard";
+import SocialMediaPage from "./SocialMediaPage";
 
 interface User {
   id: string;
@@ -106,6 +110,15 @@ export default function Dashboard() {
   const [creatingTicket, setCreatingTicket] = useState(false);
 
   const token = () => localStorage.getItem("token");
+
+  // Listen for tab-switching events from child components
+  useEffect(() => {
+    const handler = (e: any) => {
+      if (e.detail) setActiveTab(e.detail);
+    };
+    window.addEventListener("growlocal:switch-tab", handler);
+    return () => window.removeEventListener("growlocal:switch-tab", handler);
+  }, []);
 
   // Load dashboard data
   useEffect(() => {
@@ -458,6 +471,7 @@ export default function Dashboard() {
               { id: "reviews", label: "⭐ Customer Reviews" },
               { id: "chatbot", label: "💬 Lead Chatbot" },
               { id: "seo", label: "📈 SEO Report" },
+              { id: "calendar", label: "📅 Calendar & Bookings" },
               { id: "support", label: "🎧 Support & Help" },
               { id: "settings", label: "⚙️ Settings" }
             ].filter(tab => availableTabs.length === 0 || availableTabs.includes(tab.id)).map((tab) => (
@@ -486,6 +500,12 @@ export default function Dashboard() {
             </div>
           </div>
           <button
+            onClick={() => navigate("/faq")}
+            className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-semibold py-2 rounded-lg text-xs transition border border-slate-700"
+          >
+            ❓ Help & FAQ
+          </button>
+          <button
             onClick={handleLogout}
             className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-semibold py-2 rounded-lg text-xs transition border border-slate-700"
           >
@@ -510,107 +530,20 @@ export default function Dashboard() {
           </div>
         </header>
 
-        {/* Overview section */}
+        {/* Overview section - Enhanced Command Center */}
         {activeTab === "overview" && (
-          <div className="space-y-8 animate-fadeIn">
-            {/* Warm Welcome Board */}
-            <div className="bg-gradient-to-tr from-purple-900/20 to-indigo-900/10 border border-purple-500/20 rounded-2xl p-6 sm:p-8 space-y-4">
-              <h2 className="text-xl sm:text-2xl font-black text-white">Welcome to GrowLocal AI, {user?.name}! 🎉</h2>
-              <p className="text-slate-300 text-sm sm:text-base max-w-3xl leading-relaxed">
-                Your AI Marketing Agent is currently setting up automation fields for <span className="text-white font-bold">{business?.name}</span>. Here is how to complete your first-day onboarding:
-              </p>
-              <div className="grid sm:grid-cols-3 gap-4 pt-2">
-                <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl space-y-1">
-                  <div className="text-purple-400 font-black text-lg">1. Create Social</div>
-                  <p className="text-xs text-slate-400">Review your automated draft posts under the Social tab.</p>
-                </div>
-                <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl space-y-1">
-                  <div className="text-purple-400 font-black text-lg">2. Send Review</div>
-                  <p className="text-xs text-slate-400">Send a review request link to a client to get Google reviews.</p>
-                </div>
-                <div className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl space-y-1">
-                  <div className="text-purple-400 font-black text-lg">3. Embed Bot</div>
-                  <p className="text-xs text-slate-400">Embed the Q&A Widget onto your site to respond within 60s.</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Performance Stats Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
-              <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-2">
-                <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Total Reviews</div>
-                <div className="text-3xl font-black text-white">{reviews.length}</div>
-                <p className="text-xs text-green-400">⚡ {reviewStats.reviewed_count} via automated requests</p>
-              </div>
-              <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-2">
-                <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Review Requests Sent</div>
-                <div className="text-3xl font-black text-white">{reviewStats.sent_count}</div>
-                <p className="text-xs text-slate-400">{reviewStats.pending_count} pending delivery</p>
-              </div>
-              <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-2">
-                <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Conversion Rate</div>
-                <div className="text-3xl font-black text-white">{reviewStats.conversion_rate}%</div>
-                <p className="text-xs text-purple-400">{reviewStats.reviewed_count}/{reviewStats.total_requests} requests converted</p>
-              </div>
-              <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-2">
-                <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Local SEO Score</div>
-                <div className="text-3xl font-black text-white">88%</div>
-                <p className="text-xs text-green-400">⚡ Good local SEO health</p>
-              </div>
-            </div>
-          </div>
+          <OverviewDashboard businessId={business?.id || ""} token={token()} />
         )}
 
-        {/* Social Posts Tab */}
+        {/* Social Posts Tab - Enhanced */}
         {activeTab === "social" && (
-          <div className="space-y-6 animate-fadeIn">
-            <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
-              <div>
-                <h2 className="text-xl font-bold text-white">Social Media Manager</h2>
-                <p className="text-sm text-slate-400">Manage, preview, and approve your AI-generated marketing posts.</p>
-              </div>
-              <button 
-                onClick={handleForceGeneratePosts}
-                disabled={generatingPosts}
-                className="bg-purple-600 hover:bg-purple-500 text-white font-semibold text-sm px-4 py-2 rounded-lg transition disabled:opacity-50"
-              >
-                {generatingPosts ? "Generating..." : "⚡ Force AI Content Generation"}
-              </button>
-            </div>
-
-            {posts.length === 0 ? (
-              <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-8 text-center space-y-4">
-                <div className="text-4xl">📸</div>
-                <div className="space-y-1">
-                  <h3 className="text-lg font-bold text-white">Drafting Your AI Social Media Posts</h3>
-                  <p className="text-sm text-slate-400 max-w-md mx-auto">Our marketing engine generates 3 unique local-focused social posts every week. Check back in a few minutes or click generation above.</p>
-                </div>
-              </div>
-            ) : (
-              <div className="grid md:grid-cols-3 gap-6">
-                {posts.map((post) => (
-                  <div key={post.id} className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 flex flex-col justify-between space-y-4">
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold px-2 py-1 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">{post.status}</span>
-                        <span className="text-xs text-slate-400">{post.scheduled_at || "Scheduled this week"}</span>
-                      </div>
-                      <p className="text-sm text-slate-300 leading-relaxed">"{post.content}"</p>
-                      {post.image_url && (
-                        <div className="aspect-video bg-slate-900 rounded-lg flex items-center justify-center text-xs text-slate-500 border border-slate-800">
-                          Image Attachment Attached
-                        </div>
-                      )}
-                    </div>
-                    <div className="pt-2 border-t border-slate-800 flex gap-2">
-                      <button className="flex-1 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold py-2 rounded transition">Approve</button>
-                      <button className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold py-2 rounded transition border border-slate-700">Reschedule</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <SocialMediaPage
+            businessId={business?.id || ""}
+            businessTier={business?.tier || "Starter"}
+            businessName={business?.name || ""}
+            businessCategory={business?.category || ""}
+            token={token()}
+          />
         )}
 
         {/* Customer Reviews Tab - Enhanced */}
@@ -1086,92 +1019,14 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Settings Tab */}
+        {/* Calendar & Bookings Tab */}
+        {activeTab === "calendar" && (
+          <CalendarPage businessId={business?.id || ""} token={token()} />
+        )}
+
+        {/* Settings Tab - Enhanced */}
         {activeTab === "settings" && (
-          <div className="space-y-6 animate-fadeIn">
-            <div>
-              <h2 className="text-xl font-bold text-white">Business Settings</h2>
-              <p className="text-sm text-slate-400">Configure your business data profile and subscription settings.</p>
-            </div>
-
-            <div className="bg-slate-800/40 border border-slate-800 rounded-xl p-6 space-y-6 max-w-2xl">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-400">Business Name</label>
-                  <input
-                    type="text"
-                    disabled
-                    value={business?.name || ""}
-                    className="w-full bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2 text-slate-400 text-sm cursor-not-allowed"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-400">Email Address</label>
-                  <input
-                    type="text"
-                    disabled
-                    value={user?.email || ""}
-                    className="w-full bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2 text-slate-400 text-sm cursor-not-allowed"
-                  />
-                </div>
-              </div>
-
-              <div className="border-t border-slate-800 pt-6 space-y-4">
-                <h3 className="font-bold text-white">Subscription Management</h3>
-                <p className="text-xs text-slate-400">Upgrade or subscribe to one of our premium marketing tiers instantly via Stripe:</p>
-                <div className="grid sm:grid-cols-3 gap-4">
-                  <div className={`p-4 rounded-xl border ${business?.tier === 'Starter' ? 'bg-purple-500/10 border-purple-500' : 'bg-slate-900/50 border-slate-800'} space-y-2`}>
-                    <div className="text-sm font-bold text-white">Starter ($149.99/mo)</div>
-                    <p className="text-xs text-slate-400">12 AI posts/mo, Review tracker, Chatbot</p>
-                    {business?.tier === 'Starter' ? (
-                      <span className="inline-block text-xs font-bold text-purple-400 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">Current Plan</span>
-                    ) : (
-                      <a
-                        href="https://buy.stripe.com/28EdR96thgBo2LIb0m2go03"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block text-center w-full bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-1.5 rounded-lg transition"
-                      >
-                        Subscribe / Change
-                      </a>
-                    )}
-                  </div>
-                  <div className={`p-4 rounded-xl border ${business?.tier === 'Pro' ? 'bg-purple-500/10 border-purple-500' : 'bg-slate-900/50 border-slate-800'} space-y-2`}>
-                    <div className="text-sm font-bold text-white">Pro ($499.99/mo)</div>
-                    <p className="text-xs text-slate-400">30 posts/mo, IG bot, SEO, WhatsApp, GBP</p>
-                    {business?.tier === 'Pro' ? (
-                      <span className="inline-block text-xs font-bold text-purple-400 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">Current Plan</span>
-                    ) : (
-                      <a
-                        href="https://buy.stripe.com/cNi00jdVJetg1HE9Wi2go04"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block text-center w-full bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold py-1.5 rounded-lg transition"
-                      >
-                        Subscribe / Change
-                      </a>
-                    )}
-                  </div>
-                  <div className={`p-4 rounded-xl border ${business?.tier === 'Premium' ? 'bg-purple-500/10 border-purple-500' : 'bg-slate-900/50 border-slate-800'} space-y-2`}>
-                    <div className="text-sm font-bold text-white">Premium ($999.99/mo)</div>
-                    <p className="text-xs text-slate-400">Unlimited posts, Video, Human review, Priority</p>
-                    {business?.tier === 'Premium' ? (
-                      <span className="inline-block text-xs font-bold text-purple-400 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">Current Plan</span>
-                    ) : (
-                      <a
-                        href="https://buy.stripe.com/aFa3cv8Bpad0euq8Se2go05"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block text-center w-full bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-1.5 rounded-lg transition"
-                      >
-                        Subscribe / Change
-                      </a>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <SettingsPage business={business} token={token()} />
         )}
 
       </main>

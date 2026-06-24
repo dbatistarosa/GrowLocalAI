@@ -4,6 +4,7 @@ import Dashboard from "./Dashboard";
 import LoginPage from "./LoginPage";
 import AdminPanel from "./AdminPanel";
 import OnboardingWizard from "./OnboardingWizard";
+import FAQPage from "./FAQPage";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/admin" element={<AdminPanel />} />
         <Route path="/onboarding" element={<OnboardingWizard />} />
+        <Route path="/faq" element={<FAQPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Router>
