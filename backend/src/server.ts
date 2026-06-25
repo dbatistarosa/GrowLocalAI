@@ -990,7 +990,7 @@ const TIER_LIMITS = {
     whatsapp: false,
     competitorTracking: false,
     incomeTracking: false,
-    tabs: ["overview", "social", "reviews", "support", "settings"]
+    tabs: ["overview", "social", "reviews", "support", "faq", "settings"]
   },
   Pro: {
     label: "Pro",
@@ -1003,7 +1003,7 @@ const TIER_LIMITS = {
     whatsapp: true,
     competitorTracking: false,
     incomeTracking: false,
-    tabs: ["overview", "social", "reviews", "chatbot", "seo", "support", "settings"]
+    tabs: ["overview", "social", "reviews", "chatbot", "seo", "support", "faq", "settings"]
   },
   Premium: {
     label: "Premium",
@@ -1016,7 +1016,7 @@ const TIER_LIMITS = {
     whatsapp: true,
     competitorTracking: true,
     incomeTracking: true,
-    tabs: ["overview", "social", "reviews", "chatbot", "seo", "competitors", "income", "support", "settings"]
+    tabs: ["overview", "social", "reviews", "chatbot", "seo", "competitors", "income", "support", "faq", "settings"]
   }
 };
 
@@ -1223,6 +1223,17 @@ app.post("/api/media", authenticate, async (req, res) => {
     res.status(201).json({ id, url, type, name });
   } catch (err) {
     res.status(500).json({ error: "Failed to add media" });
+  }
+});
+
+app.delete("/api/media/:id", authenticate, async (req, res) => {
+  const { businessId } = (req as any).user;
+  const { id } = req.params;
+  try {
+    await query(`DELETE FROM media WHERE id = '${id}' AND business_id = '${businessId}'`);
+    res.json({ message: "Media deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete media" });
   }
 });
 

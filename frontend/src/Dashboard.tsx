@@ -4,6 +4,7 @@ import SettingsPage from "./SettingsPage";
 import CalendarPage from "./CalendarPage";
 import OverviewDashboard from "./OverviewDashboard";
 import SocialMediaPage from "./SocialMediaPage";
+import faqData from "./faqData";
 
 interface User {
   id: string;
@@ -75,7 +76,6 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   // Sub-states for specific sections
-  const [posts, setPosts] = useState<SocialPost[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [reviewRequests, setReviewRequests] = useState<ReviewRequest[]>([]);
   const [reviewStats, setReviewStats] = useState<ReviewRequestStats>({
@@ -98,7 +98,10 @@ export default function Dashboard() {
   const [chatbotHistory, setChatbotHistory] = useState<any[]>([]);
   const [chatbotConfig, setChatbotConfig] = useState<string>("");
   const [savingConfig, setSavingConfig] = useState(false);
-  const [generatingPosts, setGeneratingPosts] = useState(false);
+
+  // FAQ states
+  const [faqSearch, setFaqSearch] = useState("");
+  const [expandedFaq, setExpandedFaq] = useState<string | null>(null);
 
   // Support states
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
@@ -147,15 +150,6 @@ export default function Dashboard() {
           } catch (e) {
             console.error("Failed to parse chatbot config");
           }
-        }
-
-        // Fetch Posts
-        const postsRes = await fetch("/api/posts", {
-          headers: { Authorization: `Bearer ${t}` }
-        });
-        if (postsRes.ok) {
-          const postsData = await postsRes.json();
-          setPosts(postsData);
         }
 
         // Fetch Reviews
@@ -327,27 +321,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleForceGeneratePosts = async () => {
-    const t = token();
-    if (!t) return;
-    
-    setGeneratingPosts(true);
-    try {
-      const res = await fetch("/api/ai/generate-posts", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${t}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPosts(prev => [...data.posts, ...prev]);
-      }
-    } catch (err) {
-      console.error("Failed to generate posts:", err);
-    } finally {
-      setGeneratingPosts(false);
-    }
-  };
-
   const handleSaveChatbotConfig = async () => {
     const t = token();
     if (!t) return;
@@ -473,6 +446,7 @@ export default function Dashboard() {
               { id: "seo", label: "📈 SEO Report" },
               { id: "calendar", label: "📅 Calendar & Bookings" },
               { id: "support", label: "🎧 Support & Help" },
+              { id: "faq", label: "❓ Help & FAQ" },
               { id: "settings", label: "⚙️ Settings" }
             ].filter(tab => availableTabs.length === 0 || availableTabs.includes(tab.id)).map((tab) => (
               <button
@@ -499,12 +473,6 @@ export default function Dashboard() {
               <div className="text-xs text-slate-400 truncate">{business?.name}</div>
             </div>
           </div>
-          <button
-            onClick={() => navigate("/faq")}
-            className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-semibold py-2 rounded-lg text-xs transition border border-slate-700"
-          >
-            ❓ Help & FAQ
-          </button>
           <button
             onClick={handleLogout}
             className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-semibold py-2 rounded-lg text-xs transition border border-slate-700"
@@ -1016,6 +984,99 @@ export default function Dashboard() {
               </div>
 
             </div>
+          </div>
+        )}
+
+        {/* Help & FAQ Tab */}
+        {activeTab === "faq" && (
+          <div className="space-y-6 animate-fadeIn max-w-4xl">
+            <div>
+              <h2 className="text-xl font-bold text-white">Help & FAQ</h2>
+              <p className="text-sm text-slate-400">Find answers to common questions about using GrowLocal AI.</p>
+            </div>
+
+            {/* Search Bar */}
+            <div className="relative">
+              <input
+                type="text"
+                value={faqSearch}
+                onChange={(e) => setFaqSearch(e.target.value)}
+                placeholder="Search for a question..."
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-10 py-3 text-white focus:outline-none focus:border-purple-500 transition"
+              />
+              <div className="absolute left-3 top-3.5 text-slate-500">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+                </svg>
+              </div>
+            </div>
+
+            <div className="space-y-8">
+              {faqData
+                .filter(cat => {
+                  // Filter by tier
+                  if (cat.tier === "pro_premium") {
+                    return business?.tier === "Pro" || business?.tier === "Premium";
+                  }
+                  return true;
+                })
+                .map(category => {
+                  // Filter questions by search
+                  const filteredQuestions = category.questions.filter(q => 
+                    q.q.toLowerCase().includes(faqSearch.toLowerCase()) || 
+                    q.a.toLowerCase().includes(faqSearch.toLowerCase())
+                  );
+
+                  if (filteredQuestions.length === 0) return null;
+
+                  return (
+                    <div key={category.category} className="space-y-4">
+                      <h3 className="text-sm font-bold text-purple-400 uppercase tracking-wider px-2">{category.category}</h3>
+                      <div className="space-y-2">
+                        {filteredQuestions.map(item => (
+                          <div 
+                            key={item.q} 
+                            className="bg-slate-800/40 border border-slate-800 rounded-xl overflow-hidden transition hover:border-slate-700"
+                          >
+                            <button
+                              onClick={() => setExpandedFaq(expandedFaq === item.q ? null : item.q)}
+                              className="w-full text-left p-4 flex items-center justify-between gap-4"
+                            >
+                              <span className="text-sm font-semibold text-slate-100">{item.q}</span>
+                              <span className={`text-slate-500 transition-transform ${expandedFaq === item.q ? 'rotate-180' : ''}`}>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                                </svg>
+                              </span>
+                            </button>
+                            {expandedFaq === item.q && (
+                              <div className="px-4 pb-4 animate-slideDown">
+                                <p className="text-sm text-slate-400 leading-relaxed border-t border-slate-800/50 pt-3">
+                                  {item.a}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+
+            {/* No Results */}
+            {faqData.every(cat => cat.questions.every(q => !q.q.toLowerCase().includes(faqSearch.toLowerCase()) && !q.a.toLowerCase().includes(faqSearch.toLowerCase()))) && (
+              <div className="text-center py-12 space-y-4">
+                <div className="text-4xl">🔍</div>
+                <p className="text-slate-400 italic">No questions found matching your search.</p>
+                <button 
+                  onClick={() => setFaqSearch("")}
+                  className="text-purple-400 hover:text-purple-300 text-sm font-bold underline"
+                >
+                  Clear search
+                </button>
+              </div>
+            )}
           </div>
         )}
 
