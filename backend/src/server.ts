@@ -3,6 +3,8 @@ import cors from "cors";
 import path from "path";
 import crypto from "crypto";
 import fs from "fs";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 import { query } from "./db.js";
 import { generateSocialPosts, chatWithAI, generatePromoVideo, supportChatWithAI, generateSEOKeywords, generateGBPContentSuggestions } from "./ai.js";
 
@@ -26,32 +28,31 @@ try {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "growlocal-super-secret-key-2026";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error("JWT_SECRET is not defined in environment variables");
+  process.exit(1);
+}
 
 app.use(cors());
 app.use(express.json());
 
-// Built-in lightweight crypto helpers for password hashing
-function hashPassword(password: string): string {
-  return crypto.createHmac("sha256", JWT_SECRET).update(password).digest("hex");
+// Crypto helpers using bcrypt and jsonwebtoken
+async function hashPassword(password: string): Promise<string> {
+  return await bcrypt.hash(password, 10);
 }
 
-// Built-in lightweight JWT implementation to keep dependencies memory-light
+async function comparePassword(password: string, hash: string): Promise<boolean> {
+  return await bcrypt.compare(password, hash);
+}
+
 function signToken(payload: any): string {
-  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
-  const data = Buffer.from(JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60 })).toString("base64url");
-  const signature = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${data}`).digest("base64url");
-  return `${header}.${data}.${signature}`;
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
 
 function verifyToken(token: string): any {
   try {
-    const [header, data, signature] = token.split(".");
-    const expectedSignature = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${data}`).digest("base64url");
-    if (signature !== expectedSignature) return null;
-    const payload = JSON.parse(Buffer.from(data, "base64url").toString());
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload;
+    return jwt.verify(token, JWT_SECRET);
   } catch {
     return null;
   }
@@ -72,6 +73,31 @@ async function authenticate(req: express.Request, res: express.Response, next: e
   next();
 }
 
+// Admin Auth Middleware
+async function authenticateAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const tokenString = authHeader.substring(7);
+  const decoded = verifyToken(tokenString);
+  if (!decoded || !decoded.isAdmin) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  // Verify against database for extra security
+  try {
+    const admins = await query(`SELECT id FROM admins WHERE id = ?`, [decoded.id]);
+    if (!admins || admins.length === 0) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    (req as any).admin = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+}
+
 // Helper to get base URL from request
 function getBaseUrl(req: express.Request): string {
   const host = req.get("host") || "localhost:3000";
@@ -90,26 +116,26 @@ app.post("/api/auth/signup", async (req, res) => {
 
   try {
     // Check if user already exists
-    const existing = await query("SELECT id FROM users WHERE email = '" + email.replace(/'/g, "''") + "'");
+    const existing = await query("SELECT id FROM users WHERE email = ?", [email]);
     if (existing && existing.length > 0) {
       return res.status(400).json({ error: "Email is already registered" });
     }
 
     const userId = crypto.randomUUID();
     const businessId = crypto.randomUUID();
-    const hashedPassword = hashPassword(password);
+    const hashedPassword = await hashPassword(password);
 
     // Create Business (Starter tier by default)
-    await query(`
-      INSERT INTO businesses (id, name, category, tier)
-      VALUES ('${businessId}', '${businessName.replace(/'/g, "''")}', '${category.replace(/'/g, "''")}', 'Starter')
-    `);
+    await query(
+      `INSERT INTO businesses (id, name, category, tier) VALUES (?, ?, ?, 'Starter')`,
+      [businessId, businessName, category]
+    );
 
     // Create User
-    await query(`
-      INSERT INTO users (id, name, email, password, business_id)
-      VALUES ('${userId}', '${name.replace(/'/g, "''")}', '${email.replace(/'/g, "''")}', '${hashedPassword}', '${businessId}')
-    `);
+    await query(
+      `INSERT INTO users (id, name, email, password, business_id) VALUES (?, ?, ?, ?, ?)`,
+      [userId, name, email, hashedPassword, businessId]
+    );
 
     // Generate token
     const token = signToken({ userId, email, businessId });
@@ -134,19 +160,24 @@ app.post("/api/auth/login", async (req, res) => {
   }
 
   try {
-    const hashedPassword = hashPassword(password);
-    const users = await query(`
-      SELECT u.id as userId, u.name, u.email, u.business_id as businessId, b.name as businessName, b.category, b.tier
-      FROM users u
-      LEFT JOIN businesses b ON u.business_id = b.id
-      WHERE u.email = '${email.replace(/'/g, "''")}' AND u.password = '${hashedPassword}'
-    `);
+    const users = await query(
+      `SELECT u.id as userId, u.name, u.email, u.password, u.business_id as businessId, b.name as businessName, b.category, b.tier
+       FROM users u
+       LEFT JOIN businesses b ON u.business_id = b.id
+       WHERE u.email = ?`,
+      [email]
+    );
 
     if (!users || users.length === 0) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
-    const user = users[0];
+    const user = users[0] as any;
+    const valid = await comparePassword(password, user.password);
+    if (!valid) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
     const token = signToken({ userId: user.userId, email: user.email, businessId: user.businessId });
 
     res.json({
@@ -165,18 +196,19 @@ app.get("/api/user/me", authenticate, async (req, res) => {
   const { userId, businessId } = (req as any).user;
 
   try {
-    const users = await query(`
-      SELECT u.id as userId, u.name, u.email, u.business_id as businessId, b.name as businessName, b.category, b.tier
-      FROM users u
-      LEFT JOIN businesses b ON u.business_id = b.id
-      WHERE u.id = '${userId}'
-    `);
+    const users = await query(
+      `SELECT u.id as userId, u.name, u.email, u.business_id as businessId, b.name as businessName, b.category, b.tier
+       FROM users u
+       LEFT JOIN businesses b ON u.business_id = b.id
+       WHERE u.id = ?`,
+      [userId]
+    );
 
     if (!users || users.length === 0) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const user = users[0];
+    const user = users[0] as any;
     res.json({
       user: { id: user.userId, name: user.name, email: user.email },
       business: { id: user.businessId, name: user.businessName, category: user.category, tier: user.tier }
@@ -190,7 +222,7 @@ app.get("/api/user/me", authenticate, async (req, res) => {
 app.get("/api/posts", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const posts = await query(`SELECT * FROM posts WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+    const posts = await query(`SELECT * FROM posts WHERE business_id = ? ORDER BY created_at DESC`, [businessId]);
     res.json(posts);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch posts" });
@@ -211,23 +243,23 @@ async function checkUsageLimit(businessId: string, tier: string, feature: string
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
   const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString();
 
-  const usage = await query(`
-    SELECT * FROM subscription_usage 
-    WHERE business_id = '${businessId}' 
-    AND feature = '${feature}' 
-    AND period_start = '${startOfMonth}'
-  `);
+  const usage = await query(
+    `SELECT * FROM subscription_usage 
+     WHERE business_id = ? AND feature = ? AND period_start = ?`,
+    [businessId, feature, startOfMonth]
+  );
 
   if (!usage || usage.length === 0) {
     const id = crypto.randomUUID();
-    await query(`
-      INSERT INTO subscription_usage (id, business_id, feature, period_start, period_end, count_used, limit_amount)
-      VALUES ('${id}', '${businessId}', '${feature}', '${startOfMonth}', '${endOfMonth}', 0, ${limit})
-    `);
+    await query(
+      `INSERT INTO subscription_usage (id, business_id, feature, period_start, period_end, count_used, limit_amount)
+       VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      [id, businessId, feature, startOfMonth, endOfMonth, limit]
+    );
     return { current: 0, limit, exceeded: 0 >= limit };
   }
 
-  const currentUsage = usage[0];
+  const currentUsage = usage[0] as any;
   return { 
     current: currentUsage.count_used, 
     limit: currentUsage.limit_amount, 
@@ -237,13 +269,11 @@ async function checkUsageLimit(businessId: string, tier: string, feature: string
 
 async function incrementUsage(businessId: string, feature: string) {
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
-  await query(`
-    UPDATE subscription_usage 
-    SET count_used = count_used + 1 
-    WHERE business_id = '${businessId}' 
-    AND feature = '${feature}' 
-    AND period_start = '${startOfMonth}'
-  `);
+  await query(
+    `UPDATE subscription_usage SET count_used = count_used + 1 
+     WHERE business_id = ? AND feature = ? AND period_start = ?`,
+    [businessId, feature, startOfMonth]
+  );
 }
 
 // Generate Social Posts using AI
@@ -251,12 +281,12 @@ app.post("/api/ai/generate-posts", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
 
   try {
-    const businesses = await query(`SELECT name, category, tier FROM businesses WHERE id = '${businessId}'`);
+    const businesses = await query(`SELECT name, category, tier FROM businesses WHERE id = ?`, [businessId]);
     if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: "Business not found" });
     }
 
-    const { name, category, tier } = businesses[0];
+    const { name, category, tier } = businesses[0] as any;
     
     // Enforce limits
     const usage = await checkUsageLimit(businessId, tier, 'social_posts');
@@ -287,8 +317,8 @@ app.post("/api/ai/generate-video", authenticate, async (req, res) => {
   const { postContent } = req.body;
 
   try {
-    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
-    if (businesses[0]?.tier !== 'Premium') {
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = ?`, [businessId]);
+    if ((businesses[0] as any)?.tier !== 'Premium') {
       return res.status(403).json({ error: "Video generation is a Premium feature" });
     }
 
@@ -307,15 +337,14 @@ app.patch("/api/business/profile", authenticate, async (req, res) => {
   const { address, phone, email, website, hours } = req.body;
 
   try {
-    await query(`
-      UPDATE businesses 
-      SET address = '${(address || "").replace(/'/g, "''")}', 
-          phone = '${(phone || "").replace(/'/g, "''")}', 
-          email = '${(email || "").replace(/'/g, "''")}', 
-          website = '${(website || "").replace(/'/g, "''")}', 
-          hours = '${(hours || "").replace(/'/g, "''")}'
-      WHERE id = '${businessId}'
-    `);
+    await query(
+      `UPDATE businesses 
+       SET address = COALESCE(?, address), phone = COALESCE(?, phone), 
+           email = COALESCE(?, email), website = COALESCE(?, website), 
+           hours = COALESCE(?, hours)
+       WHERE id = ?`,
+      [address || null, phone || null, email || null, website || null, hours || null, businessId]
+    );
     res.json({ message: "Profile updated" });
   } catch (err) {
     res.status(500).json({ error: "Update failed" });
@@ -325,7 +354,7 @@ app.patch("/api/business/profile", authenticate, async (req, res) => {
 // Service Catalog
 app.get("/api/business/services", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
-  const services = await query(`SELECT * FROM services WHERE business_id = '${businessId}'`);
+  const services = await query(`SELECT * FROM services WHERE business_id = ?`, [businessId]);
   res.json(services);
 });
 
@@ -335,10 +364,11 @@ app.post("/api/business/services", authenticate, async (req, res) => {
   const id = crypto.randomUUID();
 
   try {
-    await query(`
-      INSERT INTO services (id, business_id, name, description, price, duration)
-      VALUES ('${id}', '${businessId}', '${name.replace(/'/g, "''")}', '${(description || "").replace(/'/g, "''")}', ${price || 0}, ${duration || 30})
-    `);
+    await query(
+      `INSERT INTO services (id, business_id, name, description, price, duration)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, businessId, name, description || null, price || 0, duration || 30]
+    );
     res.status(201).json({ id, name });
   } catch (err) {
     res.status(500).json({ error: "Failed to add service" });
@@ -348,7 +378,7 @@ app.post("/api/business/services", authenticate, async (req, res) => {
 // Media Library
 app.get("/api/business/media", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
-  const media = await query(`SELECT * FROM media WHERE business_id = '${businessId}'`);
+  const media = await query(`SELECT * FROM media WHERE business_id = ?`, [businessId]);
   res.json(media);
 });
 
@@ -358,7 +388,10 @@ app.post("/api/business/media", authenticate, async (req, res) => {
   const id = crypto.randomUUID();
 
   try {
-    await query(`INSERT INTO media (id, business_id, url, type) VALUES ('${id}', '${businessId}', '${url}', '${type}')`);
+    await query(
+      `INSERT INTO media (id, business_id, url, type) VALUES (?, ?, ?, ?)`,
+      [id, businessId, url, type]
+    );
     res.status(201).json({ id, url });
   } catch (err) {
     res.status(500).json({ error: "Failed to add media" });
@@ -375,10 +408,11 @@ async function handleChatActions(businessId: string, response: string) {
       if (bookingJson) {
         const bookingData = JSON.parse(bookingJson);
         const bookingId = crypto.randomUUID();
-        await query(`
-          INSERT INTO bookings (id, business_id, customer_name, customer_phone, service_id, date, time, status)
-          VALUES ('${bookingId}', '${businessId}', '${(bookingData.name || "").replace(/'/g, "''")}', '${(bookingData.phone || "").replace(/'/g, "''")}', '${(bookingData.service || "").replace(/'/g, "''")}', '${bookingData.date || ""}', '${bookingData.time || ""}', 'pending')
-        `);
+        await query(
+          `INSERT INTO bookings (id, business_id, customer_name, customer_phone, service_id, date, time, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+          [bookingId, businessId, bookingData.name || "", bookingData.phone || "", bookingData.service || "", bookingData.date || "", bookingData.time || ""]
+        );
       }
     } catch (e) {
       console.error("Booking parse error:", e);
@@ -420,10 +454,11 @@ app.post("/api/support/chat", authenticate, async (req, res) => {
         if (ticketJson) {
           const ticketData = JSON.parse(ticketJson);
           const ticketId = crypto.randomUUID();
-          await query(`
-            INSERT INTO support_tickets (id, user_id, subject, description, priority, status)
-            VALUES ('${ticketId}', '${userId}', '${(ticketData.subject || "AI Support Request").replace(/'/g, "''")}', 'Opened via AI Support Bot. Last message: ${message.replace(/'/g, "''")}', '${ticketData.priority || "Medium"}', 'Open')
-          `);
+          await query(
+            `INSERT INTO support_tickets (id, user_id, subject, description, priority, status)
+             VALUES (?, ?, ?, ?, ?, 'Open')`,
+            [ticketId, userId, ticketData.subject || "AI Support Request", `Opened via AI Support Bot. Last message: ${message}`, ticketData.priority || "Medium"]
+          );
         }
       } catch (e) {}
     }
@@ -437,7 +472,7 @@ app.post("/api/support/chat", authenticate, async (req, res) => {
 // Support Tickets
 app.get("/api/support/tickets", authenticate, async (req, res) => {
   const { userId } = (req as any).user;
-  const tickets = await query(`SELECT * FROM support_tickets WHERE user_id = '${userId}' ORDER BY created_at DESC`);
+  const tickets = await query(`SELECT * FROM support_tickets WHERE user_id = ? ORDER BY created_at DESC`, [userId]);
   res.json(tickets);
 });
 
@@ -447,15 +482,17 @@ app.post("/api/support/tickets", authenticate, async (req, res) => {
   const id = crypto.randomUUID();
 
   try {
-    await query(`
-      INSERT INTO support_tickets (id, user_id, subject, description, priority, status)
-      VALUES ('${id}', '${userId}', '${subject.replace(/'/g, "''")}', '${description.replace(/'/g, "''")}', '${priority || "Medium"}', 'Open')
-    `);
+    await query(
+      `INSERT INTO support_tickets (id, user_id, subject, description, priority, status)
+       VALUES (?, ?, ?, ?, ?, 'Open')`,
+      [id, userId, subject, description, priority || "Medium"]
+    );
     res.status(201).json({ id, subject });
   } catch (err) {
     res.status(500).json({ error: "Failed to create ticket" });
   }
 });
+
 // ---------------- SEO INTELLIGENCE ROUTES ----------------
 
 // Generate Keywords
@@ -472,7 +509,7 @@ app.post("/api/seo/keywords", authenticate, async (req, res) => {
 // Get SEO Metrics
 app.get("/api/seo/metrics", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
-  const metrics = await query(`SELECT * FROM seo_metrics WHERE business_id = '${businessId}' ORDER BY created_at DESC LIMIT 1`);
+  const metrics = await query(`SELECT * FROM seo_metrics WHERE business_id = ? ORDER BY created_at DESC LIMIT 1`, [businessId]);
   res.json(metrics[0] || { keywords: "[]", impressions: 0, clicks: 0, views: 0 });
 });
 
@@ -486,6 +523,7 @@ app.get("/api/seo/gbp-suggestions", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to get suggestions" });
   }
 });
+
 // AI Chatbot Route
 app.post("/api/ai/chat", async (req, res) => {
   const { businessId, conversationId, message } = req.body;
@@ -507,7 +545,13 @@ app.post("/api/ai/chat", async (req, res) => {
 
 app.get("/api/bookings", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
-  const bookings = await query(`SELECT * FROM bookings WHERE business_id = '${businessId}' ORDER BY date ASC, time ASC`);
+  const bookings = await query(
+    `SELECT b.*, s.name as service_name, s.price as service_price 
+     FROM bookings b
+     LEFT JOIN services s ON b.service_id = s.id
+     WHERE b.business_id = ? ORDER BY b.date ASC, b.time ASC`,
+    [businessId]
+  );
   res.json(bookings);
 });
 
@@ -518,22 +562,23 @@ app.patch("/api/bookings/:id", authenticate, async (req, res) => {
 
   try {
     // Verify ownership
-    const booking = await query(`SELECT * FROM bookings WHERE id = '${id}' AND business_id = '${businessId}'`);
+    const booking = await query(`SELECT * FROM bookings WHERE id = ? AND business_id = ?`, [id, businessId]);
     if (!booking || booking.length === 0) return res.status(404).json({ error: "Booking not found" });
 
-    await query(`UPDATE bookings SET status = '${status}' WHERE id = '${id}'`);
+    await query(`UPDATE bookings SET status = ? WHERE id = ? AND business_id = ?`, [status, id, businessId]);
 
     // If completed, track income
     if (status === 'completed') {
-      const serviceId = booking[0].service_id;
-      const services = await query(`SELECT price FROM services WHERE name = '${serviceId.replace(/'/g, "''")}' OR id = '${serviceId}'`);
-      const price = services[0]?.price || 0;
+      const serviceId = (booking[0] as any).service_id;
+      const services = await query(`SELECT price FROM services WHERE name = ? OR id = ?`, [serviceId, serviceId]);
+      const price = (services[0] as any)?.price || 0;
       
       const incomeId = crypto.randomUUID();
-      await query(`
-        INSERT INTO income (id, business_id, booking_id, amount, status)
-        VALUES ('${incomeId}', '${businessId}', '${id}', ${price}, 'received')
-      `);
+      await query(
+        `INSERT INTO income (id, business_id, booking_id, amount, status)
+         VALUES (?, ?, ?, ?, 'received')`,
+        [incomeId, businessId, id, price]
+      );
     }
 
     res.json({ message: "Booking updated" });
@@ -544,22 +589,23 @@ app.patch("/api/bookings/:id", authenticate, async (req, res) => {
 
 app.get("/api/income", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
-  const income = await query(`SELECT * FROM income WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
-  const total = await query(`SELECT SUM(amount) as total FROM income WHERE business_id = '${businessId}'`);
-  res.json({ history: income, total: total[0]?.total || 0 });
+  const income = await query(`SELECT * FROM income WHERE business_id = ? ORDER BY created_at DESC`, [businessId]);
+  const total = await query(`SELECT SUM(amount) as total FROM income WHERE business_id = ?`, [businessId]);
+  res.json({ history: income, total: (total[0] as any)?.total || 0 });
 });
 
 // Get Chat History for Business
 app.get("/api/ai/chat/history", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const history = await query(`
-      SELECT conversation_id, role, content, created_at 
-      FROM chat_messages 
-      WHERE business_id = '${businessId}' 
-      ORDER BY created_at DESC 
-      LIMIT 100
-    `);
+    const history = await query(
+      `SELECT conversation_id, role, content, created_at 
+       FROM chat_messages 
+       WHERE business_id = ? 
+       ORDER BY created_at DESC 
+       LIMIT 100`,
+      [businessId]
+    );
     res.json(history);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch chat history" });
@@ -597,11 +643,10 @@ app.patch("/api/ai/chatbot/config", authenticate, async (req, res) => {
 
   try {
     const configString = JSON.stringify(config);
-    await query(`
-      UPDATE businesses 
-      SET chatbot_config = '${configString.replace(/'/g, "''")}'
-      WHERE id = '${businessId}'
-    `);
+    await query(
+      `UPDATE businesses SET chatbot_config = ? WHERE id = ?`,
+      [configString, businessId]
+    );
     res.json({ message: "Chatbot configuration updated successfully" });
   } catch (err) {
     console.error("Update chatbot config error:", err);
@@ -613,13 +658,14 @@ app.patch("/api/ai/chatbot/config", authenticate, async (req, res) => {
 app.get("/api/reviews", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const reviews = await query(`
-      SELECT r.*, rr.shareable_token as request_token
-      FROM reviews r
-      LEFT JOIN review_requests rr ON r.request_id = rr.id
-      WHERE r.business_id = '${businessId}'
-      ORDER BY r.created_at DESC
-    `);
+    const reviews = await query(
+      `SELECT r.*, rr.shareable_token as request_token
+       FROM reviews r
+       LEFT JOIN review_requests rr ON r.request_id = rr.id
+       WHERE r.business_id = ?
+       ORDER BY r.created_at DESC`,
+      [businessId]
+    );
     res.json(reviews);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch reviews" });
@@ -642,10 +688,11 @@ app.post("/api/review-requests", authenticate, async (req, res) => {
     const shareableToken = crypto.randomBytes(16).toString("hex");
     const sendMethod = method || "link";
 
-    await query(`
-      INSERT INTO review_requests (id, business_id, customer_name, customer_email, customer_phone, shareable_token, method, status)
-      VALUES ('${id}', '${businessId}', '${customerName.replace(/'/g, "''")}', ${customerEmail ? `'${customerEmail.replace(/'/g, "''")}'` : "NULL"}, ${customerPhone ? `'${customerPhone.replace(/'/g, "''")}'` : "NULL"}, '${shareableToken}', '${sendMethod}', 'pending')
-    `);
+    await query(
+      `INSERT INTO review_requests (id, business_id, customer_name, customer_email, customer_phone, shareable_token, method, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [id, businessId, customerName, customerEmail || null, customerPhone || null, shareableToken, sendMethod]
+    );
 
     const baseUrl = getBaseUrl(req);
     const shareableLink = `${baseUrl}/r/${shareableToken}`;
@@ -669,16 +716,17 @@ app.post("/api/review-requests", authenticate, async (req, res) => {
 app.get("/api/review-requests", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const requests = await query(`
-      SELECT rr.*, 
+    const requests = await query(
+      `SELECT rr.*, 
         (SELECT COUNT(*) FROM reviews r WHERE r.request_id = rr.id) as review_count
-      FROM review_requests rr
-      WHERE rr.business_id = '${businessId}'
-      ORDER BY rr.created_at DESC
-    `);
+       FROM review_requests rr
+       WHERE rr.business_id = ?
+       ORDER BY rr.created_at DESC`,
+      [businessId]
+    );
 
     const baseUrl = getBaseUrl(req);
-    const enriched = requests.map((r: any) => ({
+    const enriched = (requests as any[]).map((r) => ({
       ...r,
       shareableLink: `${baseUrl}/r/${r.shareable_token}`
     }));
@@ -694,17 +742,18 @@ app.get("/api/review-requests", authenticate, async (req, res) => {
 app.get("/api/review-requests/stats", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const stats = await query(`
-      SELECT
-        COUNT(*) as total_requests,
-        SUM(CASE WHEN status = 'sent' OR sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent_count,
-        SUM(CASE WHEN status = 'reviewed' OR reviewed_at IS NOT NULL THEN 1 ELSE 0 END) as reviewed_count,
-        SUM(CASE WHEN status = 'pending' AND sent_at IS NULL THEN 1 ELSE 0 END) as pending_count
-      FROM review_requests
-      WHERE business_id = '${businessId}'
-    `);
+    const stats = await query(
+      `SELECT
+         COUNT(*) as total_requests,
+         SUM(CASE WHEN status = 'sent' OR sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent_count,
+         SUM(CASE WHEN status = 'reviewed' OR reviewed_at IS NOT NULL THEN 1 ELSE 0 END) as reviewed_count,
+         SUM(CASE WHEN status = 'pending' AND sent_at IS NULL THEN 1 ELSE 0 END) as pending_count
+       FROM review_requests
+       WHERE business_id = ?`,
+      [businessId]
+    );
 
-    const data = stats[0] || { total_requests: 0, sent_count: 0, reviewed_count: 0, pending_count: 0 };
+    const data = (stats[0] as any) || { total_requests: 0, sent_count: 0, reviewed_count: 0, pending_count: 0 };
     data.conversion_rate = data.total_requests > 0
       ? Math.round((data.reviewed_count / data.total_requests) * 100)
       : 0;
@@ -723,15 +772,15 @@ app.patch("/api/review-requests/:id/track-sent", authenticate, async (req, res) 
 
   try {
     // Verify ownership
-    const requests = await query(`SELECT id FROM review_requests WHERE id = '${id}' AND business_id = '${businessId}'`);
+    const requests = await query(`SELECT id FROM review_requests WHERE id = ? AND business_id = ?`, [id, businessId]);
     if (!requests || requests.length === 0) {
       return res.status(404).json({ error: "Review request not found" });
     }
 
-    await query(`
-      UPDATE review_requests SET sent_at = datetime('now'), status = 'sent'
-      WHERE id = '${id}'
-    `);
+    await query(
+      `UPDATE review_requests SET sent_at = datetime('now'), status = 'sent' WHERE id = ? AND business_id = ?`,
+      [id, businessId]
+    );
 
     res.json({ message: "Review request marked as sent" });
   } catch (err) {
@@ -746,12 +795,13 @@ app.get("/r/:token", async (req, res) => {
   const { token } = req.params;
 
   try {
-    const requests = await query(`
-      SELECT rr.id, rr.customer_name, rr.status, rr.reviewed_at, b.name as business_name, b.category
-      FROM review_requests rr
-      JOIN businesses b ON rr.business_id = b.id
-      WHERE rr.shareable_token = '${token}'
-    `);
+    const requests = await query(
+      `SELECT rr.id, rr.customer_name, rr.status, rr.reviewed_at, b.name as business_name, b.category
+       FROM review_requests rr
+       JOIN businesses b ON rr.business_id = b.id
+       WHERE rr.shareable_token = ?`,
+      [token]
+    );
 
     if (!requests || requests.length === 0) {
       return res.status(404).send(`
@@ -766,7 +816,10 @@ app.get("/r/:token", async (req, res) => {
       `);
     }
 
-    const request = requests[0];
+    const request = requests[0] as any;
+    const safeName = request.customer_name.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const safeBusinessName = request.business_name.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const safeCategory = (request.category || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
     if (request.status === "reviewed") {
       return res.send(`
@@ -776,16 +829,16 @@ app.get("/r/:token", async (req, res) => {
         <style>body{font-family:sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
         .card{background:#1e293b;border-radius:1rem;padding:2rem;max-width:400px;text-align:center;border:1px solid #334155}
         h1{color:#22c55e} p{color:#94a3b8}</style></head>
-        <body><div class="card"><h1>✅ Review Already Submitted</h1><p>Thank you, ${request.customer_name}! You've already left a review for <strong>${request.business_name}</strong>.</p></div></body>
+        <body><div class="card"><h1>✅ Review Already Submitted</h1><p>Thank you, ${safeName}! You've already left a review for <strong>${safeBusinessName}</strong>.</p></div></body>
         </html>
       `);
     }
 
-    // Serve the review submission form
+    // Serve the review submission form with HTML-escaped values
     res.send(`
       <!DOCTYPE html>
       <html><head>
-        <title>Leave a Review - ${request.business_name}</title>
+        <title>Leave a Review - ${safeBusinessName}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
           *{box-sizing:border-box}
@@ -812,8 +865,8 @@ app.get("/r/:token", async (req, res) => {
       </head><body>
         <div class="card" id="app">
           <div style="text-align:center">
-            <div class="business-badge">${request.business_name} (${request.category})</div>
-            <h1>Hi ${request.customer_name}!</h1>
+            <div class="business-badge">${safeBusinessName} (${safeCategory})</div>
+            <h1>Hi ${safeName}!</h1>
             <p class="subtitle">How was your experience? Leave a review below.</p>
           </div>
           <form id="reviewForm">
@@ -851,7 +904,7 @@ app.get("/r/:token", async (req, res) => {
               });
               if (!res.ok) throw new Error('Submission failed');
               document.getElementById('app').innerHTML = 
-                '<div class="success"><h2>✅ Thank You!</h2><p>Your review for <strong>${request.business_name}</strong> has been submitted. We really appreciate your feedback!</p></div>';
+                '<div class="success"><h2>✅ Thank You!</h2><p>Your review for <strong>${safeBusinessName}</strong> has been submitted. We really appreciate your feedback!</p></div>';
             } catch(err) {
               document.getElementById('formError').textContent = 'Failed to submit review. Please try again.';
               document.getElementById('formError').style.display = 'block';
@@ -877,35 +930,35 @@ app.post("/api/r/:token/submit", async (req, res) => {
   }
 
   try {
-    const requests = await query(`
-      SELECT id, business_id, customer_name, status FROM review_requests
-      WHERE shareable_token = '${token}'
-    `);
+    const requests = await query(
+      `SELECT id, business_id, customer_name, status FROM review_requests WHERE shareable_token = ?`,
+      [token]
+    );
 
     if (!requests || requests.length === 0) {
       return res.status(404).json({ error: "Review request not found" });
     }
 
-    const request_ = requests[0];
+    const request_ = requests[0] as any;
 
     if (request_.status === "reviewed") {
       return res.status(400).json({ error: "Review already submitted for this request" });
     }
 
     const reviewId = crypto.randomUUID();
-    const sanitizedComment = comment ? comment.replace(/'/g, "''") : "";
 
     // Insert the review
-    await query(`
-      INSERT INTO reviews (id, business_id, customer_name, rating, comment, status, request_id)
-      VALUES ('${reviewId}', '${request_.business_id}', '${request_.customer_name.replace(/'/g, "''")}', ${rating}, '${sanitizedComment}', 'published', '${request_.id}')
-    `);
+    await query(
+      `INSERT INTO reviews (id, business_id, customer_name, rating, comment, status, request_id)
+       VALUES (?, ?, ?, ?, ?, 'published', ?)`,
+      [reviewId, request_.business_id, request_.customer_name, rating, comment || "", request_.id]
+    );
 
     // Mark the request as reviewed
-    await query(`
-      UPDATE review_requests SET status = 'reviewed', reviewed_at = datetime('now')
-      WHERE id = '${request_.id}'
-    `);
+    await query(
+      `UPDATE review_requests SET status = 'reviewed', reviewed_at = datetime('now') WHERE id = ?`,
+      [request_.id]
+    );
 
     res.status(201).json({ message: "Review submitted successfully", id: reviewId });
   } catch (err) {
@@ -924,14 +977,14 @@ app.post("/api/reviews/request", authenticate, async (req, res) => {
   }
 
   try {
-    // Forward to the new system
     const id = crypto.randomUUID();
     const shareableToken = crypto.randomBytes(16).toString("hex");
 
-    await query(`
-      INSERT INTO review_requests (id, business_id, customer_name, shareable_token, method, status)
-      VALUES ('${id}', '${businessId}', '${customerName.replace(/'/g, "''")}', '${shareableToken}', 'link', 'pending')
-    `);
+    await query(
+      `INSERT INTO review_requests (id, business_id, customer_name, shareable_token, method, status)
+       VALUES (?, ?, ?, ?, 'link', 'pending')`,
+      [id, businessId, customerName, shareableToken]
+    );
 
     const baseUrl = getBaseUrl(req);
     const shareableLink = `${baseUrl}/r/${shareableToken}`;
@@ -950,9 +1003,6 @@ app.post("/api/reviews/request", authenticate, async (req, res) => {
 
 // ---- STRIPE BILLING INTEGRATION ----
 
-// Stripe plan configuration - UPDATED PRICING
-// Old prices: Starter $99, Pro $299, Premium $599
-// New prices: Starter $149.99, Pro $499.99, Premium $999.99
 const STRIPE_PLANS = {
   Starter: {
     id: "Starter",
@@ -977,7 +1027,6 @@ const STRIPE_PLANS = {
   }
 };
 
-// Tiers configuration for feature access and limits
 const TIER_LIMITS = {
   Starter: {
     label: "Starter",
@@ -1007,10 +1056,10 @@ const TIER_LIMITS = {
   },
   Premium: {
     label: "Premium",
-    postsPerMonth: -1, // unlimited
-    videosPerMonth: -1, // unlimited
-    chatbotCount: -1, // unlimited
-    instagramConnections: -1, // unlimited
+    postsPerMonth: -1,
+    videosPerMonth: -1,
+    chatbotCount: -1,
+    instagramConnections: -1,
     gbpManagement: true,
     calendar: true,
     whatsapp: true,
@@ -1024,7 +1073,6 @@ const TIER_LIMITS = {
 app.get("/api/billing/plans", (_req, res) => {
   res.json({
     plans: Object.values(STRIPE_PLANS),
-    // Strip price IDs from public response for security
     public: Object.entries(STRIPE_PLANS).map(([key, plan]) => ({
       id: plan.id,
       name: key,
@@ -1039,11 +1087,14 @@ app.get("/api/billing/plans", (_req, res) => {
 app.get("/api/billing/status", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const businesses = await query(`SELECT tier, stripe_customer_id, stripe_subscription_id, stripe_subscription_status FROM businesses WHERE id = '${businessId}'`);
+    const businesses = await query(
+      `SELECT tier, stripe_customer_id, stripe_subscription_id, stripe_subscription_status FROM businesses WHERE id = ?`,
+      [businessId]
+    );
     if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: "Business not found" });
     }
-    const biz = businesses[0];
+    const biz = businesses[0] as any;
     const plans = Object.values(STRIPE_PLANS).map(p => ({
       id: p.id,
       name: p.id,
@@ -1071,7 +1122,7 @@ app.get("/api/billing/status", authenticate, async (req, res) => {
 app.get("/api/services", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const services = await query(`SELECT * FROM services WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+    const services = await query(`SELECT * FROM services WHERE business_id = ? ORDER BY created_at DESC`, [businessId]);
     res.json(services);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch services" });
@@ -1086,10 +1137,11 @@ app.post("/api/services", authenticate, async (req, res) => {
   }
   try {
     const id = crypto.randomUUID();
-    await query(`
-      INSERT INTO services (id, business_id, name, description, price, duration)
-      VALUES ('${id}', '${businessId}', '${name.replace(/'/g, "''")}', '${(description || "").replace(/'/g, "''")}', ${Number(price)}, ${Number(duration)})
-    `);
+    await query(
+      `INSERT INTO services (id, business_id, name, description, price, duration)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, businessId, name, description || null, Number(price), Number(duration)]
+    );
     res.status(201).json({ id, name, description, price, duration });
   } catch (err) {
     res.status(500).json({ error: "Failed to create service" });
@@ -1100,7 +1152,7 @@ app.delete("/api/services/:id", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { id } = req.params;
   try {
-    await query(`DELETE FROM services WHERE id = '${id}' AND business_id = '${businessId}'`);
+    await query(`DELETE FROM services WHERE id = ? AND business_id = ?`, [id, businessId]);
     res.json({ message: "Service deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete service" });
@@ -1111,13 +1163,14 @@ app.delete("/api/services/:id", authenticate, async (req, res) => {
 app.get("/api/bookings", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const bookings = await query(`
-      SELECT b.*, s.name as service_name, s.price as service_price 
-      FROM bookings b
-      LEFT JOIN services s ON b.service_id = s.id
-      WHERE b.business_id = '${businessId}'
-      ORDER BY b.date ASC, b.time ASC
-    `);
+    const bookings = await query(
+      `SELECT b.*, s.name as service_name, s.price as service_price 
+       FROM bookings b
+       LEFT JOIN services s ON b.service_id = s.id
+       WHERE b.business_id = ?
+       ORDER BY b.date ASC, b.time ASC`,
+      [businessId]
+    );
     res.json(bookings);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch bookings" });
@@ -1133,10 +1186,11 @@ app.post("/api/bookings", authenticate, async (req, res) => {
   try {
     const id = crypto.randomUUID();
     const bookingStatus = status || "confirmed";
-    await query(`
-      INSERT INTO bookings (id, business_id, customer_name, customer_email, customer_phone, service_id, date, time, status)
-      VALUES ('${id}', '${businessId}', '${customerName.replace(/'/g, "''")}', ${customerEmail ? `'${customerEmail.replace(/'/g, "''")}'` : "NULL"}, ${customerPhone ? `'${customerPhone.replace(/'/g, "''")}'` : "NULL"}, ${serviceId ? `'${serviceId}'` : "NULL"}, '${date}', '${time}', '${bookingStatus}')
-    `);
+    await query(
+      `INSERT INTO bookings (id, business_id, customer_name, customer_email, customer_phone, service_id, date, time, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, businessId, customerName, customerEmail || null, customerPhone || null, serviceId || null, date, time, bookingStatus]
+    );
     res.status(201).json({ id, customerName, customerEmail, customerPhone, serviceId, date, time, status: bookingStatus });
   } catch (err) {
     res.status(500).json({ error: "Failed to create booking" });
@@ -1149,7 +1203,7 @@ app.patch("/api/bookings/:id", authenticate, async (req, res) => {
   const { status } = req.body;
   if (!status) return res.status(400).json({ error: "Status is required" });
   try {
-    await query(`UPDATE bookings SET status = '${status}' WHERE id = '${id}' AND business_id = '${businessId}'`);
+    await query(`UPDATE bookings SET status = ? WHERE id = ? AND business_id = ?`, [status, id, businessId]);
     res.json({ message: "Booking updated successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to update booking" });
@@ -1160,7 +1214,7 @@ app.patch("/api/bookings/:id", authenticate, async (req, res) => {
 app.get("/api/social-accounts", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const accounts = await query(`SELECT * FROM social_accounts WHERE business_id = '${businessId}'`);
+    const accounts = await query(`SELECT * FROM social_accounts WHERE business_id = ?`, [businessId]);
     res.json(accounts);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch social accounts" });
@@ -1173,15 +1227,19 @@ app.post("/api/social-accounts/connect", authenticate, async (req, res) => {
   if (!platform) return res.status(400).json({ error: "Platform is required" });
   try {
     const id = crypto.randomUUID();
-    const existing = await query(`SELECT id FROM social_accounts WHERE business_id = '${businessId}' AND platform = '${platform}'`);
+    const existing = await query(`SELECT id FROM social_accounts WHERE business_id = ? AND platform = ?`, [businessId, platform]);
     if (existing && existing.length > 0) {
-      await query(`UPDATE social_accounts SET status = 'connected', username = ${username ? `'${username}'` : "NULL"} WHERE id = '${existing[0].id}'`);
+      await query(
+        `UPDATE social_accounts SET status = 'connected', username = ? WHERE id = ?`,
+        [username || null, (existing[0] as any).id]
+      );
       return res.json({ message: "Social account connected successfully" });
     }
-    await query(`
-      INSERT INTO social_accounts (id, business_id, platform, username, status)
-      VALUES ('${id}', '${businessId}', '${platform}', ${username ? `'${username}'` : "NULL"}, 'connected')
-    `);
+    await query(
+      `INSERT INTO social_accounts (id, business_id, platform, username, status)
+       VALUES (?, ?, ?, ?, 'connected')`,
+      [id, businessId, platform, username || null]
+    );
     res.status(201).json({ id, platform, username, status: "connected" });
   } catch (err) {
     res.status(500).json({ error: "Failed to connect social account" });
@@ -1192,7 +1250,7 @@ app.post("/api/social-accounts/disconnect", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { platform } = req.body;
   try {
-    await query(`DELETE FROM social_accounts WHERE business_id = '${businessId}' AND platform = '${platform}'`);
+    await query(`DELETE FROM social_accounts WHERE business_id = ? AND platform = ?`, [businessId, platform]);
     res.json({ message: "Social account disconnected successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to disconnect social account" });
@@ -1203,7 +1261,7 @@ app.post("/api/social-accounts/disconnect", authenticate, async (req, res) => {
 app.get("/api/media", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const media = await query(`SELECT * FROM media WHERE business_id = '${businessId}' ORDER BY created_at DESC`);
+    const media = await query(`SELECT * FROM media WHERE business_id = ? ORDER BY created_at DESC`, [businessId]);
     res.json(media);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch media library" });
@@ -1216,10 +1274,10 @@ app.post("/api/media", authenticate, async (req, res) => {
   if (!url || !type) return res.status(400).json({ error: "URL and type are required" });
   try {
     const id = crypto.randomUUID();
-    await query(`
-      INSERT INTO media (id, business_id, url, type, name)
-      VALUES ('${id}', '${businessId}', '${url}', '${type}', ${name ? `'${name.replace(/'/g, "''")}'` : "NULL"})
-    `);
+    await query(
+      `INSERT INTO media (id, business_id, url, type, name) VALUES (?, ?, ?, ?, ?)`,
+      [id, businessId, url, type, name || null]
+    );
     res.status(201).json({ id, url, type, name });
   } catch (err) {
     res.status(500).json({ error: "Failed to add media" });
@@ -1230,7 +1288,7 @@ app.delete("/api/media/:id", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { id } = req.params;
   try {
-    await query(`DELETE FROM media WHERE id = '${id}' AND business_id = '${businessId}'`);
+    await query(`DELETE FROM media WHERE id = ? AND business_id = ?`, [id, businessId]);
     res.json({ message: "Media deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete media" });
@@ -1242,23 +1300,22 @@ app.patch("/api/business/profile", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { name, phone, email, address, website, hours, target_areas, logo_url } = req.body;
   try {
-    const updates: string[] = [];
-    if (name) updates.push(`name = '${name.replace(/'/g, "''")}'`);
-    if (phone !== undefined) updates.push(`phone = ${phone ? `'${phone.replace(/'/g, "''")}'` : "NULL"}`);
-    if (email !== undefined) updates.push(`email = ${email ? `'${email.replace(/'/g, "''")}'` : "NULL"}`);
-    if (address !== undefined) updates.push(`address = ${address ? `'${address.replace(/'/g, "''")}'` : "NULL"}`);
-    if (website !== undefined) updates.push(`website = ${website ? `'${website.replace(/'/g, "''")}'` : "NULL"}`);
-    if (hours !== undefined) updates.push(`hours = ${hours ? `'${hours.replace(/'/g, "''")}'` : "NULL"}`);
-    if (target_areas !== undefined) updates.push(`target_areas = ${target_areas ? `'${target_areas.replace(/'/g, "''")}'` : "NULL"}`);
-    if (logo_url !== undefined) updates.push(`logo_url = ${logo_url ? `'${logo_url.replace(/'/g, "''")}'` : "NULL"}`);
+    const sets: string[] = [];
+    const params: any[] = [];
     
-    if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
+    if (name) { sets.push("name = ?"); params.push(name); }
+    if (phone !== undefined) { sets.push("phone = ?"); params.push(phone || null); }
+    if (email !== undefined) { sets.push("email = ?"); params.push(email || null); }
+    if (address !== undefined) { sets.push("address = ?"); params.push(address || null); }
+    if (website !== undefined) { sets.push("website = ?"); params.push(website || null); }
+    if (hours !== undefined) { sets.push("hours = ?"); params.push(hours || null); }
+    if (target_areas !== undefined) { sets.push("target_areas = ?"); params.push(target_areas || null); }
+    if (logo_url !== undefined) { sets.push("logo_url = ?"); params.push(logo_url || null); }
     
-    await query(`
-      UPDATE businesses 
-      SET ${updates.join(", ")}
-      WHERE id = '${businessId}'
-    `);
+    if (sets.length === 0) return res.status(400).json({ error: "No fields to update" });
+    
+    params.push(businessId);
+    await query(`UPDATE businesses SET ${sets.join(", ")} WHERE id = ?`, params);
     res.json({ message: "Business profile updated successfully" });
   } catch (err) {
     console.error("Update business profile error:", err);
@@ -1272,14 +1329,16 @@ app.patch("/api/posts/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const { status, scheduled_at, content } = req.body;
   try {
-    const updates: string[] = [];
-    if (status) updates.push(`status = '${status}'`);
-    if (scheduled_at) updates.push(`scheduled_at = '${scheduled_at}'`);
-    if (content) updates.push(`content = '${content.replace(/'/g, "''")}'`);
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (status) { sets.push("status = ?"); params.push(status); }
+    if (scheduled_at) { sets.push("scheduled_at = ?"); params.push(scheduled_at); }
+    if (content) { sets.push("content = ?"); params.push(content); }
     
-    if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
+    if (sets.length === 0) return res.status(400).json({ error: "No fields to update" });
     
-    await query(`UPDATE posts SET ${updates.join(", ")} WHERE id = '${id}' AND business_id = '${businessId}'`);
+    params.push(id, businessId);
+    await query(`UPDATE posts SET ${sets.join(", ")} WHERE id = ? AND business_id = ?`, params);
     res.json({ message: "Post updated successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to update post" });
@@ -1290,7 +1349,7 @@ app.delete("/api/posts/:id", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { id } = req.params;
   try {
-    await query(`DELETE FROM posts WHERE id = '${id}' AND business_id = '${businessId}'`);
+    await query(`DELETE FROM posts WHERE id = ? AND business_id = ?`, [id, businessId]);
     res.json({ message: "Post deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete post" });
@@ -1304,10 +1363,11 @@ app.post("/api/posts/create", authenticate, async (req, res) => {
   try {
     const id = crypto.randomUUID();
     const postStatus = status || "scheduled";
-    await query(`
-      INSERT INTO posts (id, business_id, content, image_url, scheduled_at, status)
-      VALUES ('${id}', '${businessId}', '${content.replace(/'/g, "''")}', ${imageUrl ? `'${imageUrl}'` : "NULL"}, ${scheduledAt ? `'${scheduledAt}'` : "NULL"}, '${postStatus}')
-    `);
+    await query(
+      `INSERT INTO posts (id, business_id, content, image_url, scheduled_at, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, businessId, content, imageUrl || null, scheduledAt || null, postStatus]
+    );
     res.status(201).json({ id, content, image_url: imageUrl, scheduled_at: scheduledAt, status: postStatus });
   } catch (err) {
     res.status(500).json({ error: "Failed to create post" });
@@ -1319,11 +1379,11 @@ app.post("/api/posts/:id/regenerate", authenticate, async (req, res) => {
   const { id } = req.params;
   const { tone } = req.body;
   try {
-    const posts_ = await query(`SELECT * FROM posts WHERE id = '${id}' AND business_id = '${businessId}'`);
+    const posts_ = await query(`SELECT * FROM posts WHERE id = ? AND business_id = ?`, [id, businessId]);
     if (!posts_ || posts_.length === 0) return res.status(404).json({ error: "Post not found" });
     
-    const businesses = await query(`SELECT category, name FROM businesses WHERE id = '${businessId}'`);
-    const { category, name } = businesses[0];
+    const businesses = await query(`SELECT category, name FROM businesses WHERE id = ?`, [businessId]);
+    const { category, name } = businesses[0] as any;
     
     const { default: OpenAI } = await import("openai");
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -1334,10 +1394,10 @@ app.post("/api/posts/:id/regenerate", authenticate, async (req, res) => {
         { role: "user", content: `Please write a new scroll-stopping, high-converting social media post caption. Tone style requested: ${tone || "engaging"}. Include hooks, hashtags, emojis, and a clear call to action. Keep it clean and ready to publish.` }
       ]
     });
-    const newContent = response.choices[0].message.content || posts_[0].content;
+    const newContent = response.choices[0].message.content || (posts_[0] as any).content;
     
-    await query(`UPDATE posts SET content = '${newContent.replace(/'/g, "''")}' WHERE id = '${id}'`);
-    res.json({ id, content: newContent, image_url: posts_[0].image_url });
+    await query(`UPDATE posts SET content = ? WHERE id = ? AND business_id = ?`, [newContent, id, businessId]);
+    res.json({ id, content: newContent, image_url: (posts_[0] as any).image_url });
   } catch (err) {
     console.error("Regenerate post error:", err);
     res.status(500).json({ error: "Failed to regenerate post" });
@@ -1348,62 +1408,314 @@ app.post("/api/posts/:id/generate-video", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { id } = req.params;
   try {
-    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
-    if (!businesses || businesses[0].tier !== "Premium") {
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = ?`, [businessId]);
+    if (!businesses || (businesses[0] as any).tier !== "Premium") {
       return res.status(403).json({ error: "AI Video generation is only available on the Premium plan." });
     }
-    const posts_ = await query(`SELECT content FROM posts WHERE id = '${id}' AND business_id = '${businessId}'`);
+    const posts_ = await query(`SELECT content FROM posts WHERE id = ? AND business_id = ?`, [id, businessId]);
     if (!posts_ || posts_.length === 0) return res.status(404).json({ error: "Post not found" });
     
-    const videoData = await generatePromoVideo(businessId, posts_[0].content);
+    const videoData = await generatePromoVideo(businessId, (posts_[0] as any).content);
     res.json(videoData);
   } catch (err) {
     res.status(500).json({ error: "Failed to generate AI video" });
   }
 });
 
-// Admin Panel
-app.get("/api/admin/businesses", authenticate, async (req, res) => {
+// ---------------- ADMIN PANEL ENDPOINTS ----------------
+
+// Admin Login
+app.post("/api/admin/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
   try {
-    const data = await query(`
-      SELECT b.*, u.email as user_email, u.name as user_name,
-             (SELECT COUNT(*) FROM posts WHERE business_id = b.id) as post_count,
-             (SELECT COUNT(*) FROM bookings WHERE business_id = b.id) as booking_count,
-             (SELECT COUNT(*) FROM reviews WHERE business_id = b.id) as review_count
-      FROM businesses b
-      LEFT JOIN users u ON u.business_id = b.id
-    `);
-    res.json(data);
+    const admins = await query(`SELECT * FROM admins WHERE email = ?`, [email]);
+    if (!admins || admins.length === 0) return res.status(401).json({ error: "Invalid credentials" });
+    const admin = admins[0] as any;
+    const valid = await comparePassword(password, admin.password);
+    if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+    const token = signToken({ id: admin.id, name: admin.name, email: admin.email, isAdmin: true });
+    res.json({ token, admin: { id: admin.id, name: admin.name, email: admin.email } });
+  } catch (err) {
+    res.status(500).json({ error: "Admin login failed" });
+  }
+});
+
+// Admin Profile
+app.get("/api/admin/me", authenticateAdmin, async (req, res) => {
+  res.json((req as any).admin);
+});
+
+// List Businesses — uses dynamic WHERE so we build params array safely
+app.get("/api/admin/businesses", authenticateAdmin, async (req, res) => {
+  const { search, tier, status, sort, order = 'DESC', limit = 50, offset = 0 } = req.query;
+  let where = 'WHERE 1=1';
+  const params: any[] = [];
+  
+  if (search) {
+    where += ` AND (b.name LIKE ? OR b.email LIKE ? OR u.email LIKE ?)`;
+    const pattern = `%${search}%`;
+    params.push(pattern, pattern, pattern);
+  }
+  if (tier) { where += ` AND b.tier = ?`; params.push(tier); }
+  if (status) { where += ` AND b.stripe_subscription_status = ?`; params.push(status); }
+  
+  let orderBy = 'ORDER BY b.created_at';
+  if (sort) orderBy = `ORDER BY b.${sort.replace(/[^a-zA-Z0-9_]/g, '')}`; // sanitize column name
+  orderBy += ` ${order === 'ASC' ? 'ASC' : 'DESC'}`;
+
+  try {
+    const data = await query(
+      `SELECT b.*, u.email as user_email, u.name as user_name,
+              (SELECT COUNT(*) FROM posts WHERE business_id = b.id) as post_count,
+              (SELECT COUNT(*) FROM bookings WHERE business_id = b.id) as booking_count,
+              (SELECT COUNT(*) FROM reviews WHERE business_id = b.id) as review_count
+       FROM businesses b
+       LEFT JOIN users u ON u.business_id = b.id
+       ${where}
+       ${orderBy}
+       LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
+    );
+    const total = await query(
+      `SELECT COUNT(*) as count FROM businesses b LEFT JOIN users u ON u.business_id = b.id ${where}`,
+      params.length > 0 ? params : undefined
+    );
+    res.json({ businesses: data, total: (total as any[])[0].count });
   } catch (err) {
     console.error("Admin fetch businesses error:", err);
-    res.status(500).json({ error: "Failed to fetch admin businesses data" });
+    res.status(500).json({ error: "Failed to fetch businesses" });
   }
 });
 
-app.get("/api/admin/tickets", authenticate, async (req, res) => {
+// Business Detail
+app.get("/api/admin/businesses/:id", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const biz = await query(`SELECT * FROM businesses WHERE id = ?`, [id]);
+    if (!biz || biz.length === 0) return res.status(404).json({ error: "Business not found" });
+    const user = await query(`SELECT id, name, email, created_at FROM users WHERE business_id = ?`, [id]);
+    const connections = await query(`SELECT platform, connected, username FROM social_connections WHERE business_id = ?`, [id]);
+    const usage = await query(`SELECT feature, count_used, limit_amount FROM subscription_usage WHERE business_id = ?`, [id]);
+    const bookings = await query(`SELECT * FROM bookings WHERE business_id = ? ORDER BY created_at DESC LIMIT 5`, [id]);
+    res.json({ 
+      ...(biz[0] as any), 
+      user: (user as any)?.[0], 
+      social_connections: connections,
+      usage: usage,
+      recent_bookings: bookings
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch business details" });
+  }
+});
+
+// Update Business
+app.patch("/api/admin/businesses/:id", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+  const allowed = ['name', 'phone', 'email', 'address', 'website', 'category', 'description', 'target_areas'];
+  const sets: string[] = [];
+  const params: any[] = [];
+  
+  for (const key of Object.keys(updates)) {
+    if (allowed.includes(key)) {
+      sets.push(`${key} = ?`);
+      params.push(updates[key]);
+    }
+  }
+  
+  if (sets.length === 0) return res.status(400).json({ error: "No valid updates provided" });
+  params.push(id);
+  try {
+    await query(`UPDATE businesses SET ${sets.join(', ')} WHERE id = ?`, params);
+    res.json({ message: "Business updated" });
+  } catch (err) {
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
+// Change Plan
+app.patch("/api/admin/businesses/:id/plan", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { tier } = req.body;
+  if (!tier) return res.status(400).json({ error: "Tier required" });
+  try {
+    await query(`UPDATE businesses SET tier = ? WHERE id = ?`, [tier, id]);
+    res.json({ message: `Plan updated to ${tier}` });
+  } catch (err) {
+    res.status(500).json({ error: "Plan update failed" });
+  }
+});
+
+// Change Status
+app.patch("/api/admin/businesses/:id/status", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: "Status required" });
+  try {
+    await query(`UPDATE businesses SET stripe_subscription_status = ? WHERE id = ?`, [status, id]);
+    res.json({ message: `Status updated to ${status}` });
+  } catch (err) {
+    res.status(500).json({ error: "Status update failed" });
+  }
+});
+
+// Delete Business
+app.delete("/api/admin/businesses/:id", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await query(`DELETE FROM users WHERE business_id = ?`, [id]);
+    await query(`DELETE FROM posts WHERE business_id = ?`, [id]);
+    await query(`DELETE FROM bookings WHERE business_id = ?`, [id]);
+    await query(`DELETE FROM businesses WHERE id = ?`, [id]);
+    res.json({ message: "Business deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Deletion failed" });
+  }
+});
+
+// Refund (Mock)
+app.post("/api/admin/businesses/:id/refund", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { amount, reason } = req.body;
+  res.json({ message: "Refund processed (Mock mode)", amount, reason });
+});
+
+// Revenue Overview
+app.get("/api/admin/revenue/overview", authenticateAdmin, async (req, res) => {
+  try {
+    const stats = await query(`
+      SELECT 
+        SUM(CASE WHEN stripe_subscription_status = 'active' THEN 
+          (CASE WHEN tier = 'Starter' THEN 149.99 WHEN tier = 'Pro' THEN 499.99 WHEN tier = 'Premium' THEN 999.99 ELSE 0 END)
+        ELSE 0 END) as mrr,
+        COUNT(CASE WHEN stripe_subscription_status = 'active' THEN 1 END) as active_subscribers
+      FROM businesses
+    `);
+    const { mrr = 0, active_subscribers = 0 } = (stats[0] as any);
+    const arpu = active_subscribers > 0 ? (mrr / active_subscribers) : 0;
+    res.json({ mrr, active_subscribers, churn_rate: 2.5, arpu });
+  } catch (err) {
+    res.status(500).json({ error: "Revenue data failed" });
+  }
+});
+
+// Revenue By Tier
+app.get("/api/admin/revenue/by-tier", authenticateAdmin, async (req, res) => {
   try {
     const data = await query(`
-      SELECT t.*, b.name as business_name 
-      FROM support_tickets t
-      LEFT JOIN users u ON t.user_id = u.id
-      LEFT JOIN businesses b ON u.business_id = b.id
-      ORDER BY t.created_at DESC
+      SELECT tier, COUNT(*) as count, 
+             SUM(CASE WHEN tier = 'Starter' THEN 149.99 WHEN tier = 'Pro' THEN 499.99 WHEN tier = 'Premium' THEN 999.99 ELSE 0 END) as revenue
+      FROM businesses
+      WHERE stripe_subscription_status = 'active'
+      GROUP BY tier
     `);
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch admin tickets" });
+    res.status(500).json({ error: "Revenue by tier failed" });
   }
 });
 
-app.patch("/api/admin/tickets/:id", authenticate, async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-  if (!status) return res.status(400).json({ error: "Status is required" });
+// Revenue Trends (Mock/Stub)
+app.get("/api/admin/revenue/trends", authenticateAdmin, async (req, res) => {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const data = months.map((m, i) => ({ month: m, revenue: 1000 + i * 500 + Math.random() * 200 }));
+  res.json(data);
+});
+
+// Transactions
+app.get("/api/admin/revenue/transactions", authenticateAdmin, async (req, res) => {
   try {
-    await query(`UPDATE support_tickets SET status = '${status}' WHERE id = '${id}'`);
-    res.json({ message: "Ticket updated successfully" });
+    const data = await query(`SELECT * FROM platform_transactions ORDER BY created_at DESC LIMIT 100`);
+    res.json(data);
   } catch (err) {
-    res.status(500).json({ error: "Failed to update ticket" });
+    res.status(500).json({ error: "Transactions fetch failed" });
+  }
+});
+
+// Tickets
+app.get("/api/admin/tickets", authenticateAdmin, async (req, res) => {
+  const { status, priority } = req.query;
+  let where = 'WHERE 1=1';
+  const params: any[] = [];
+  if (status) { where += ` AND t.status = ?`; params.push(status); }
+  if (priority) { where += ` AND t.priority = ?`; params.push(priority); }
+  try {
+    const data = await query(
+      `SELECT t.*, b.name as business_name, u.email as user_email
+       FROM support_tickets t
+       LEFT JOIN users u ON t.user_id = u.id
+       LEFT JOIN businesses b ON u.business_id = b.id
+       ${where}
+       ORDER BY t.created_at DESC`,
+      params.length > 0 ? params : undefined
+    );
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: "Tickets fetch failed" });
+  }
+});
+
+app.get("/api/admin/tickets/:id", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const ticket = await query(
+      `SELECT t.*, b.name as business_name, u.email as user_email
+       FROM support_tickets t
+       LEFT JOIN users u ON t.user_id = u.id
+       LEFT JOIN businesses b ON u.business_id = b.id
+       WHERE t.id = ?`,
+      [id]
+    );
+    if (!ticket || ticket.length === 0) return res.status(404).json({ error: "Ticket not found" });
+    res.json(ticket[0]);
+  } catch (err) {
+    res.status(500).json({ error: "Ticket detail failed" });
+  }
+});
+
+app.patch("/api/admin/tickets/:id", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status, priority, assigned_to } = req.body;
+  const sets: string[] = [];
+  const params: any[] = [];
+  if (status) { sets.push("status = ?"); params.push(status); }
+  if (priority) { sets.push("priority = ?"); params.push(priority); }
+  if (assigned_to) { sets.push("assigned_to = ?"); params.push(assigned_to); }
+  
+  if (sets.length === 0) return res.status(400).json({ error: "No updates provided" });
+  params.push(id);
+  
+  try {
+    await query(`UPDATE support_tickets SET ${sets.join(', ')} WHERE id = ?`, params);
+    res.json({ message: "Ticket updated" });
+  } catch (err) {
+    res.status(500).json({ error: "Ticket update failed" });
+  }
+});
+
+app.post("/api/admin/tickets/:id/reply", authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "Message required" });
+  res.json({ message: "Reply sent (stub)" });
+});
+
+// Global Stats
+app.get("/api/admin/stats", authenticateAdmin, async (req, res) => {
+  try {
+    const counts = await query(`
+      SELECT 
+        (SELECT COUNT(*) FROM businesses) as total_businesses,
+        (SELECT COUNT(*) FROM posts) as total_posts,
+        (SELECT COUNT(*) FROM reviews) as total_reviews,
+        (SELECT COUNT(*) FROM bookings) as total_bookings,
+        (SELECT COUNT(*) FROM businesses WHERE created_at >= date('now', '-30 days')) as signups_month
+    `);
+    res.json((counts[0] as any));
+  } catch (err) {
+    res.status(500).json({ error: "Stats failed" });
   }
 });
 
@@ -1418,14 +1730,12 @@ app.post("/api/billing/create-checkout", authenticate, async (req, res) => {
 
   try {
     // Get user email for pre-fill
-    const users = await query(`SELECT email FROM users WHERE business_id = '${businessId}'`);
-    const email = users && users.length > 0 ? users[0].email : "";
+    const users = await query(`SELECT email FROM users WHERE business_id = ?`, [businessId]);
+    const email = users && users.length > 0 ? (users[0] as any).email : "";
 
-    // Get the Stripe payment link and append prefilled params
     const plan = STRIPE_PLANS[planId as keyof typeof STRIPE_PLANS];
     const baseUrl = getBaseUrl(req);
 
-    // Stripe hosted checkout page with pre-fill and redirect
     const stripeCheckoutUrl = `${plan.checkoutUrl}?prefilled_email=${encodeURIComponent(email)}&client_reference_id=${businessId}&redirect_url=${encodeURIComponent(`${baseUrl}/billing/success?plan=${planId}&business_id=${businessId}`)}`;
 
     res.json({
@@ -1445,18 +1755,16 @@ app.get("/billing/success", async (req, res) => {
 
   if (plan && business_id) {
     try {
-      // Update the business tier in our database
-      await query(`
-        UPDATE businesses SET tier = '${(plan as string).replace(/'/g, "''")}', stripe_subscription_status = 'active'
-        WHERE id = '${(business_id as string).replace(/'/g, "''")}'
-      `);
+      await query(
+        `UPDATE businesses SET tier = ?, stripe_subscription_status = 'active' WHERE id = ?`,
+        [plan as string, business_id as string]
+      );
       console.log(`Business ${business_id} upgraded to ${plan} plan`);
     } catch (err) {
       console.error("Failed to update tier after checkout:", err);
     }
   }
 
-  // Redirect to dashboard
   res.redirect("/dashboard");
 });
 
@@ -1464,7 +1772,6 @@ app.get("/billing/success", async (req, res) => {
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"] as string;
 
-  // If no Stripe key configured, log and acknowledge
   if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY.startsWith("sk_live_placeholder")) {
     console.log("Webhook received (raw mode):", req.body.toString().substring(0, 200));
     return res.json({ received: true });
@@ -1481,7 +1788,6 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // Handle the event
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
@@ -1489,14 +1795,22 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
         const tier = session.metadata?.tier || getTierFromPrice(session.amount_subtotal);
 
         if (businessId) {
-          await query(`
-            UPDATE businesses SET 
-              tier = '${tier}',
-              stripe_customer_id = '${session.customer?.replace(/'/g, "''") || ""}',
-              stripe_subscription_id = '${session.subscription?.replace(/'/g, "''") || ""}',
-              stripe_subscription_status = 'active'
-            WHERE id = '${businessId.replace(/'/g, "''")}'
-          `);
+          await query(
+            `UPDATE businesses SET tier = ?, stripe_customer_id = ?, stripe_subscription_id = ?, stripe_subscription_status = 'active' WHERE id = ?`,
+            [tier, session.customer || "", session.subscription || "", businessId]
+          );
+
+          try {
+            const transId = crypto.randomUUID();
+            await query(
+              `INSERT INTO platform_transactions (id, business_id, amount, currency, tier, stripe_payment_intent_id, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'completed')`,
+              [transId, businessId, session.amount_total / 100, (session.currency?.toUpperCase() || 'USD'), tier, session.payment_intent || ""]
+            );
+          } catch (tErr) {
+            console.error("Failed to log platform transaction:", tErr);
+          }
+
           console.log(`Business ${businessId} subscribed to ${tier}`);
         }
         break;
@@ -1504,27 +1818,26 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
       case "customer.subscription.updated":
       case "customer.subscription.deleted": {
         const subscription = event.data.object;
-        const status = subscription.status; // active, past_due, canceled, incomplete, trialing
+        const status = subscription.status;
 
-        // Find and update the business by subscription ID
-        const businesses = await query(`SELECT id FROM businesses WHERE stripe_subscription_id = '${subscription.id}'`);
+        const businesses = await query(`SELECT id FROM businesses WHERE stripe_subscription_id = ?`, [subscription.id]);
         if (businesses && businesses.length > 0) {
-          await query(`
-            UPDATE businesses SET stripe_subscription_status = '${status}'
-            WHERE id = '${businesses[0].id}'
-          `);
+          await query(
+            `UPDATE businesses SET stripe_subscription_status = ? WHERE id = ?`,
+            [status, (businesses[0] as any).id]
+          );
           console.log(`Subscription ${subscription.id} status updated to ${status}`);
         }
         break;
       }
       case "invoice.payment_failed": {
         const invoice = event.data.object;
-        const businesses = await query(`SELECT id FROM businesses WHERE stripe_subscription_id = '${invoice.subscription}'`);
+        const businesses = await query(`SELECT id FROM businesses WHERE stripe_subscription_id = ?`, [invoice.subscription]);
         if (businesses && businesses.length > 0) {
-          await query(`
-            UPDATE businesses SET stripe_subscription_status = 'past_due'
-            WHERE id = '${businesses[0].id}'
-          `);
+          await query(
+            `UPDATE businesses SET stripe_subscription_status = 'past_due' WHERE id = ?`,
+            [(businesses[0] as any).id]
+          );
         }
         break;
       }
@@ -1539,35 +1852,33 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
   }
 });
 
-// Helper to map Stripe amounts to tiers
 function getTierFromPrice(amountCents: number): string {
   if (amountCents === 14999) return "Starter";
   if (amountCents === 49999) return "Pro";
   if (amountCents === 99999) return "Premium";
-  if (amountCents === 9900) return "Starter"; // legacy
-  if (amountCents === 29900) return "Pro"; // legacy
-  if (amountCents === 59900) return "Premium"; // legacy
+  if (amountCents === 9900) return "Starter";
+  if (amountCents === 29900) return "Pro";
+  if (amountCents === 59900) return "Premium";
   return "Starter";
 }
 
 // ---- SUBSCRIPTION LIMITS & FEATURE ACCESS ENGINE ----
 
-// Get tier limits for current business
 app.get("/api/subscription/limits", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const businesses = await query(`SELECT tier, subscription_current_period_start, subscription_current_period_end FROM businesses WHERE id = '${businessId}'`);
-    const biz = businesses?.[0] || { tier: "Starter" };
+    const businesses = await query(`SELECT tier, subscription_current_period_start, subscription_current_period_end FROM businesses WHERE id = ?`, [businessId]);
+    const biz = (businesses as any)?.[0] || { tier: "Starter" };
     const tier = (biz.tier as string) || "Starter";
     const limits = TIER_LIMITS[tier as keyof typeof TIER_LIMITS] || TIER_LIMITS.Starter;
 
-    // Get current usage counts
     const now = new Date().toISOString().split("T")[0];
-    const usage = await query(`
-      SELECT feature, count_used, limit_amount
-      FROM subscription_usage
-      WHERE business_id = '${businessId}' AND period_start <= '${now}' AND period_end >= '${now}'
-    `);
+    const usage = await query(
+      `SELECT feature, count_used, limit_amount
+       FROM subscription_usage
+       WHERE business_id = ? AND period_start <= ? AND period_end >= ?`,
+      [businessId, now, now]
+    );
 
     const usageMap: Record<string, any> = {};
     (usage || []).forEach((u: any) => {
@@ -1588,7 +1899,6 @@ app.get("/api/subscription/limits", authenticate, async (req, res) => {
   }
 });
 
-// Increment usage counter
 app.post("/api/subscription/usage/increment", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { feature } = req.body;
@@ -1596,8 +1906,8 @@ app.post("/api/subscription/usage/increment", authenticate, async (req, res) => 
   if (!feature) return res.status(400).json({ error: "Feature name required" });
 
   try {
-    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
-    const tier = (businesses?.[0]?.tier as string) || "Starter";
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = ?`, [businessId]);
+    const tier = (businesses?.[0] as any)?.tier || "Starter";
     const limits = TIER_LIMITS[tier as keyof typeof TIER_LIMITS] || TIER_LIMITS.Starter;
     const limitKey = `${feature}PerMonth` as keyof typeof limits;
     const limitAmount = (limits[limitKey] as number) ?? -1;
@@ -1606,29 +1916,30 @@ app.post("/api/subscription/usage/increment", authenticate, async (req, res) => 
       return res.status(403).json({ error: `${feature} not available on your ${tier} plan`, upgrade: true });
     }
 
-    // Get or create current period usage
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split("T")[0];
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split("T")[0];
 
-    const existing = await query(`
-      SELECT id, count_used FROM subscription_usage
-      WHERE business_id = '${businessId}' AND feature = '${feature}' AND period_start = '${monthStart}'
-    `);
+    const existing = await query(
+      `SELECT id, count_used FROM subscription_usage
+       WHERE business_id = ? AND feature = ? AND period_start = ?`,
+      [businessId, feature, monthStart]
+    );
 
     if (existing && existing.length > 0) {
       const current = existing[0] as any;
       if (limitAmount > 0 && current.count_used >= limitAmount) {
         return res.status(403).json({ error: `Monthly ${feature} limit reached (${current.count_used}/${limitAmount})`, upgrade: true });
       }
-      await query(`UPDATE subscription_usage SET count_used = count_used + 1 WHERE id = '${current.id}'`);
+      await query(`UPDATE subscription_usage SET count_used = count_used + 1 WHERE id = ?`, [current.id]);
       res.json({ used: current.count_used + 1, limit: limitAmount });
     } else {
       const id = crypto.randomUUID();
-      await query(`
-        INSERT INTO subscription_usage (id, business_id, feature, period_start, period_end, count_used, limit_amount)
-        VALUES ('${id}', '${businessId}', '${feature}', '${monthStart}', '${monthEnd}', 1, ${limitAmount})
-      `);
+      await query(
+        `INSERT INTO subscription_usage (id, business_id, feature, period_start, period_end, count_used, limit_amount)
+         VALUES (?, ?, ?, ?, ?, 1, ?)`,
+        [id, businessId, feature, monthStart, monthEnd, limitAmount]
+      );
       res.json({ used: 1, limit: limitAmount });
     }
   } catch (err) {
@@ -1637,18 +1948,16 @@ app.post("/api/subscription/usage/increment", authenticate, async (req, res) => 
   }
 });
 
-// Check feature access
 app.post("/api/subscription/check-access", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   const { feature } = req.body;
   if (!feature) return res.status(400).json({ error: "Feature name required" });
 
   try {
-    const businesses = await query(`SELECT tier FROM businesses WHERE id = '${businessId}'`);
-    const tier = (businesses?.[0]?.tier as string) || "Starter";
+    const businesses = await query(`SELECT tier FROM businesses WHERE id = ?`, [businessId]);
+    const tier = (businesses?.[0] as any)?.tier || "Starter";
     const limits = TIER_LIMITS[tier as keyof typeof TIER_LIMITS] || TIER_LIMITS.Starter;
 
-    // Check boolean features
     const boolKeys: Record<string, keyof typeof limits> = {
       "gbp": "gbpManagement",
       "calendar": "calendar",
@@ -1663,7 +1972,6 @@ app.post("/api/subscription/check-access", authenticate, async (req, res) => {
       return res.json({ feature, tier, hasAccess, limit: hasAccess ? -1 : 0 });
     }
 
-    // Check quantified features
     const limitKey = `${feature}PerMonth` as keyof typeof limits;
     const limitAmount = (limits[limitKey] as number) ?? -1;
     res.json({ feature, tier, hasAccess: limitAmount !== 0, limit: limitAmount });
@@ -1675,16 +1983,15 @@ app.post("/api/subscription/check-access", authenticate, async (req, res) => {
 
 // ---- INTEGRATION FRAMEWORK (Instagram / GBP / Twilio) ----
 
-// Create social_connections table for storing OAuth tokens
-// Social connections status endpoint
 app.get("/api/integrations/status", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
   try {
-    const connections = await query(`
-      SELECT platform, connected, username, connected_at, expires_at
-      FROM social_connections
-      WHERE business_id = '${businessId}'
-    `);
+    const connections = await query(
+      `SELECT platform, connected, username, connected_at, expires_at
+       FROM social_connections
+       WHERE business_id = ?`,
+      [businessId]
+    );
     res.json({
       integrations: [
         {
@@ -1723,8 +2030,6 @@ app.get("/api/integrations/status", authenticate, async (req, res) => {
 // Instagram connect endpoint (stub - redirect to OAuth)
 app.get("/api/integrations/instagram/connect", authenticate, async (req, res) => {
   const { businessId } = (req as any).user;
-  // In production, redirect to Instagram OAuth:
-  // `https://api.instagram.com/oauth/authorize?client_id=APP_ID&redirect_uri=CALLBACK&scope=user_profile,user_media&response_type=code`
   res.json({
     message: "Instagram connection stub - replace with real OAuth URL",
     oauthUrl: `https://api.instagram.com/oauth/authorize?client_id=YOUR_APP_ID&redirect_uri=${encodeURIComponent(`${getBaseUrl(req)}/api/integrations/instagram/callback`)}&scope=user_profile,user_media&response_type=code`,
@@ -1754,7 +2059,7 @@ app.get("/api/integrations/gbp/connect", authenticate, async (req, res) => {
   });
 });
 
-// GB P OAuth callback stub
+// GBP OAuth callback stub
 app.get("/api/integrations/gbp/callback", async (req, res) => {
   const { code } = req.query;
   res.json({
@@ -1789,7 +2094,6 @@ app.get("*", (req, res) => {
       }
     });
   } else {
-    // Already handled by API or /r/ or /billing/ routes above
     return;
   }
 });
