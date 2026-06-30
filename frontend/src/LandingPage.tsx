@@ -276,7 +276,7 @@ export default function LandingPage() {
                 </div>
                 <div className="border-b border-slate-900 pb-3 flex items-center justify-between text-sm">
                   <span className="text-slate-300">Monthly Cost</span>
-                  <span className="font-bold text-green-400">$99 - $599 / mo</span>
+                  <span className="font-bold text-green-400">$149.99 - $999.99 / mo</span>
                 </div>
                 <div className="border-b border-slate-900 pb-3 flex items-center justify-between text-sm">
                   <span className="text-slate-300">Response Speed</span>
@@ -315,7 +315,7 @@ export default function LandingPage() {
                 <div>
                   <h3 className="text-lg font-bold text-slate-400 uppercase tracking-wider">Starter</h3>
                   <div className="mt-4 flex items-baseline text-white">
-                    <span className="text-5xl font-black tracking-tight">$99</span>
+                    <span className="text-5xl font-black tracking-tight">$149.99</span>
                     <span className="ml-1 text-xl font-semibold text-slate-400">/mo</span>
                   </div>
                   <p className="mt-2 text-sm text-slate-400">Perfect for new local service businesses getting started.</p>
@@ -355,7 +355,7 @@ export default function LandingPage() {
                 <div>
                   <h3 className="text-lg font-bold text-purple-400 uppercase tracking-wider">Pro</h3>
                   <div className="mt-4 flex items-baseline text-white">
-                    <span className="text-5xl font-black tracking-tight">$299</span>
+                    <span className="text-5xl font-black tracking-tight">$499.99</span>
                     <span className="ml-1 text-xl font-semibold text-slate-400">/mo</span>
                   </div>
                   <p className="mt-2 text-sm text-slate-300">Ideal for growing businesses looking to dominate search results.</p>
@@ -393,7 +393,7 @@ export default function LandingPage() {
                 <div>
                   <h3 className="text-lg font-bold text-slate-400 uppercase tracking-wider">Premium</h3>
                   <div className="mt-4 flex items-baseline text-white">
-                    <span className="text-5xl font-black tracking-tight">$599</span>
+                    <span className="text-5xl font-black tracking-tight">$999.99</span>
                     <span className="ml-1 text-xl font-semibold text-slate-400">/mo</span>
                   </div>
                   <p className="mt-2 text-sm text-slate-400">Dedicated review of AI content by human marketing specialists.</p>

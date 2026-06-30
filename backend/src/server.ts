@@ -6,6 +6,9 @@ import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { query } from "./db.js";
+
+console.log(`[Server] Initial NODE_ENV: ${process.env.NODE_ENV}`);
+console.log(`[Server] Current Working Directory: ${process.cwd()}`);
 import { generateSocialPosts, chatWithAI, generatePromoVideo, supportChatWithAI, generateSEOKeywords, generateGBPContentSuggestions } from "./ai.js";
 
 // Extremely lightweight, zero-dependency .env loader
@@ -29,7 +32,7 @@ try {
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
+if (!JWT_SECRET && process.env.NODE_ENV !== "test") {
   console.error("JWT_SECRET is not defined in environment variables");
   process.exit(1);
 }
@@ -47,12 +50,12 @@ async function comparePassword(password: string, hash: string): Promise<boolean>
 }
 
 function signToken(payload: any): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(payload, JWT_SECRET as string, { expiresIn: '7d' });
 }
 
 function verifyToken(token: string): any {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, JWT_SECRET as string);
   } catch {
     return null;
   }
@@ -1461,7 +1464,7 @@ app.get("/api/admin/businesses", authenticateAdmin, async (req, res) => {
   if (status) { where += ` AND b.stripe_subscription_status = ?`; params.push(status); }
   
   let orderBy = 'ORDER BY b.created_at';
-  if (sort) orderBy = `ORDER BY b.${sort.replace(/[^a-zA-Z0-9_]/g, '')}`; // sanitize column name
+  if (sort && typeof sort === 'string') orderBy = `ORDER BY b.${sort.replace(/[^a-zA-Z0-9_]/g, '')}`; // sanitize column name
   orderBy += ` ${order === 'ASC' ? 'ASC' : 'DESC'}`;
 
   try {

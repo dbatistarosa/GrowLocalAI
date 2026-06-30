@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import faqData from "./FAQ_PAGE";
+import faqData from "./faqData";
 
 export default function FAQPage() {
   const navigate = useNavigate();
