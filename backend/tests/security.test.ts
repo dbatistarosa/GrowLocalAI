@@ -16,11 +16,12 @@ describe('Security', () => {
   });
 
   it('should block SQL injection in signup', async () => {
+    const randomEmail = `inject-${Math.random()}' OR '1'='1@example.com`;
     const res = await request(app)
       .post('/api/auth/signup')
       .send({
         name: "Test",
-        email: "inject' OR '1'='1@example.com",
+        email: randomEmail,
         password: "any",
         businessName: "Test",
         category: "Test"
